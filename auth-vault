@@ -18,6 +18,28 @@ COCKPIT_ACCOUNTS="$HOME/.antigravity_cockpit/accounts.json"
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'
 B='\033[1m'; D='\033[2m'; N='\033[0m'
 
+# Responsive resize handling: trap SIGWINCH and set flag
+_NEED_REDRAW=0
+trap '_NEED_REDRAW=1' WINCH
+
+# read_input VARNAME
+# Like `read -r`, but returns 2 if terminal was resized during read.
+# Caller should redraw and re-prompt when return code is 2.
+read_input() {
+    local __varname="$1"
+    _NEED_REDRAW=0
+    local rc=0
+    read -r "$__varname" || rc=$?
+    if (( rc != 0 && _NEED_REDRAW )); then
+        clear
+        return 2
+    elif (( _NEED_REDRAW )); then
+        clear
+        return 2
+    fi
+    return 0
+}
+
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
@@ -72,7 +94,7 @@ header() {
 }
 
 sep() { echo -e "  ${D}────────────────────────────────────────────────────────${N}"; }
-press_enter() { echo ""; echo -e "  ${D}Press Enter untuk kembali...${N}"; read -r; }
+press_enter() { echo ""; echo -e "  ${D}Press Enter untuk kembali...${N}"; read_input _; return $?; }
 
 # === COCKPIT HELPERS ===
 get_current_codex_id() { [[ -f "$COCKPIT_CURRENT" ]] || { echo ""; return; }; jq -r '.current_accounts.codex // empty' "$COCKPIT_CURRENT" 2>/dev/null || echo ""; }
@@ -191,7 +213,7 @@ detail_openai() {
 
     if [[ ! -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
         echo -e "  ${R}Cockpit Tools tidak ditemukan.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     local current_id; current_id=$(get_current_codex_id)
@@ -208,7 +230,7 @@ detail_openai() {
 
     if [[ ${#ids[@]} -eq 0 ]]; then
         echo -e "  ${Y}Belum ada akun Codex di Cockpit.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     # Dynamic email column width: total = 71 + email_col
@@ -276,12 +298,15 @@ detail_openai() {
     echo -e "  ${B}${#ids[@]} akun terdaftar${N}  ${D}│${N}  ${D}github.com/Alhiefikri/auth-vault${N}"
     echo ""
     echo -e "  ${Y}Switch akun [1-${#ids[@]}] atau Enter untuk batal:${N}"
-    read -r -p "  > " pick
+    echo -n "  > "
+    local pick_rc=0
+    read_input pick || pick_rc=$?
+    if (( pick_rc == 2 )); then return 0; fi
 
     if [[ -z "$pick" ]]; then return; fi
     if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#ids[@]} )); then
         echo -e "  ${R}Pilihan tidak valid.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     local idx=$(( pick - 1 ))
@@ -358,7 +383,7 @@ detail_openai() {
     else
         echo -e "  ${R}Gagal apply.${N}"
     fi
-    press_enter
+    press_enter || return $?
 }
 
 # === DETAIL QODER (list accounts + switch) ===
@@ -424,7 +449,10 @@ detail_qoder() {
         echo -e "  ${Y}[s] Simpan profile baru, atau Enter untuk batal:${N}"
     fi
 
-    read -r -p "  > " pick
+    echo -n "  > "
+    pick_rc=0
+    read_input pick || pick_rc=$?
+    if (( pick_rc == 2 )); then return 0; fi
 
     if [[ -z "$pick" ]]; then return; fi
 
@@ -435,12 +463,12 @@ detail_qoder() {
 
     if [[ ${#profiles[@]} -eq 0 ]]; then
         echo -e "  ${R}Pilihan tidak valid.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#profiles[@]} )); then
         echo -e "  ${R}Pilihan tidak valid.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     local idx=$(( pick - 1 ))
@@ -451,7 +479,7 @@ detail_qoder() {
     echo ""
     echo -e "  ${G}✓ Qoder CLI diganti ke '$profile_name'!${N}"
     echo -e "  ${D}Restart qodercli untuk pakai akun baru.${N}"
-    press_enter
+    press_enter || return $?
 }
 
 # === SAVE QODER ===
@@ -463,7 +491,7 @@ save_qoder() {
     if [[ ! -f "$QODER_AUTH" ]]; then
         echo -e "  ${R}File auth Qoder CLI belum ada: $QODER_AUTH${N}"
         echo -e "  ${D}Login dulu: qodercli login${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     local email="(unknown)"
@@ -478,13 +506,16 @@ save_qoder() {
 
     local name
     echo -e "  ${Y}Nama profile (contoh: akun-utama):${N}"
-    read -r -p "  > " name
-    [[ -z "$name" ]] && { echo -e "  ${R}Dibatalkan.${N}"; press_enter; return; }
+    echo -n "  > "
+    name_rc=0
+    read_input name || name_rc=$?
+    if (( name_rc == 2 )); then return 0; fi
+    [[ -z "$name" ]] && { echo -e "  ${R}Dibatalkan.${N}"; press_enter || return $?; return; }
 
     vault_save "$name" "$email"
 
     echo -e "  ${G}✓ Qoder profile '$name' disimpan!${N}"
-    press_enter
+    press_enter || return $?
 }
 
 # === DELETE QODER PROFILE ===
@@ -502,7 +533,7 @@ delete_qoder() {
 
     if [[ ${#all[@]} -eq 0 ]]; then
         echo -e "  ${D}Tidak ada profile Qoder tersimpan.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     for i in "${!all[@]}"; do
@@ -510,12 +541,15 @@ delete_qoder() {
     done
     echo ""
     echo -e "  ${Y}Hapus [1-${#all[@]}] atau Enter untuk batal:${N}"
-    read -r -p "  > " pick
+    echo -n "  > "
+    pick_rc=0
+    read_input pick || pick_rc=$?
+    if (( pick_rc == 2 )); then return 0; fi
 
     if [[ -z "$pick" ]]; then return; fi
     if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#all[@]} )); then
         echo -e "  ${R}Pilihan tidak valid.${N}"
-        press_enter; return
+        press_enter || return $?; return
     fi
 
     local idx=$(( pick - 1 ))
@@ -532,7 +566,7 @@ delete_qoder() {
     else
         echo -e "  ${D}Dibatalkan.${N}"
     fi
-    press_enter
+    press_enter || return $?
 }
 
 # === AUTO-LOGIN QODER ===
@@ -545,14 +579,14 @@ autologin_qoder() {
     if ! AUTOLOGIN_SCRIPT=$(find_autologin "$SCRIPT_DIR" 2>/dev/null); then
         echo -e "  ${R}qoder-autologin tidak ditemukan.${N}"
         echo -e "  ${D}Install: symlink ke ~/.local/bin/ atau jalankan dari repo directory${N}"
-        press_enter
+        press_enter || return $?
         return
     fi
 
     # Check dependencies
     if ! command -v python3 &>/dev/null; then
         echo -e "  ${R}python3 tidak ditemukan.${N}"
-        press_enter
+        press_enter || return $?
         return
     fi
 
@@ -564,10 +598,10 @@ autologin_qoder() {
         read -r install_ans
         if [[ "${install_ans,,}" == "y" ]]; then
             run_autologin "$AUTOLOGIN_SCRIPT" setup
-            press_enter
+            press_enter || return $?
             return
         else
-            press_enter
+            press_enter || return $?
             return
         fi
     fi
@@ -578,17 +612,23 @@ autologin_qoder() {
     echo -e "  ${C}2.${N} Batch dari file"
     echo -e "  ${C}3.${N} Interactive (input manual)"
     echo ""
-    read -r -p "  Pilih > " mode
+    echo -n "  Pilih > "
+    mode_rc=0
+    read_input mode || mode_rc=$?
+    if (( mode_rc == 2 )); then return 0; fi
 
     clear
 
     case "$mode" in
         1)
             echo -e "  ${Y}Format: email:password${N}"
-            read -r -p "  > " account
+            echo -n "  > "
+            account_rc=0
+            read_input account || account_rc=$?
+            if (( account_rc == 2 )); then return 0; fi
             if [[ -z "$account" || "$account" != *":"* ]]; then
                 echo -e "  ${R}Format tidak valid.${N}"
-                press_enter
+                press_enter || return $?
                 return
             fi
             local email="${account%%:*}"
@@ -599,34 +639,37 @@ autologin_qoder() {
             profile="${profile:-$default_profile}"
             echo ""
             run_autologin "$AUTOLOGIN_SCRIPT" login "$account" "$profile"
-            press_enter
+            press_enter || return $?
             ;;
         2)
             echo -e "  ${Y}Path ke accounts file:${N}"
-            read -r -p "  > " filepath
+            echo -n "  > "
+            filepath_rc=0
+            read_input filepath || filepath_rc=$?
+            if (( filepath_rc == 2 )); then return 0; fi
             if [[ -z "$filepath" ]]; then
                 echo -e "  ${R}Dibatalkan.${N}"
-                press_enter
+                press_enter || return $?
                 return
             fi
             # Expand ~
             filepath="${filepath/#\~/$HOME}"
             if [[ ! -f "$filepath" ]]; then
                 echo -e "  ${R}File tidak ditemukan: $filepath${N}"
-                press_enter
+                press_enter || return $?
                 return
             fi
             echo ""
             run_autologin "$AUTOLOGIN_SCRIPT" batch "$filepath"
-            press_enter
+            press_enter || return $?
             ;;
         3)
             run_autologin "$AUTOLOGIN_SCRIPT" interactive
-            press_enter
+            press_enter || return $?
             ;;
         *)
             echo -e "  ${R}Pilihan tidak valid.${N}"
-            press_enter
+            press_enter || return $?
             ;;
     esac
 }
@@ -643,7 +686,10 @@ main() {
         echo -e "  ${C}5.${N} 🔓  Auto-Login Qoder"
         echo -e "  ${C}0.${N} ❌  Keluar"
         echo ""
-        read -r -p "  Pilih > " choice
+        echo -n "  Pilih > "
+        rc=0
+        read_input choice || rc=$?
+        if (( rc == 2 )); then continue; fi
 
         case "$choice" in
             1) detail_openai ;;
