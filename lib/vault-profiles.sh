@@ -42,13 +42,12 @@ vault_save() {
     cp "$QODER_AUTH" "$VAULT_DIR/$name"
     echo "$name" > "$VAULT_DIR/.current"
 
-    python3 -c "
-import json, sys, time
-d = {'name': sys.argv[1], 'email': sys.argv[2], 'saved_at': int(time.time())}
-with open(sys.argv[3], 'w') as f:
-    json.dump(d, f, indent=2)
-    f.write('\n')
-" "$name" "$email" "$VAULT_DIR/${name}.meta.json"
+    local _lib_dir
+    _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    python3 "$_lib_dir/vault_backends.py" write-meta \
+        --dir "$VAULT_DIR" \
+        --name "$name" \
+        --email "$email"
 }
 
 vault_use() {

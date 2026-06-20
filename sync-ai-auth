@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 OMP_DB="$HOME/.omp/agent/agent.db"
 PI_AUTH="$HOME/.pi/agent/auth.json"
 OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
@@ -111,48 +113,14 @@ write_to_omp() {
         return 1
     fi
 
-    local identity_key="email:${EMAIL}"
-    local now
-    now=$(date +%s)
-
-    OMP_DB="$OMP_DB" \
-    _SYNC_ACCESS="$ACCESS_TOKEN" \
-    _SYNC_REFRESH="$REFRESH_TOKEN" \
-    _SYNC_EXPIRES="$EXPIRES" \
-    _SYNC_ACCOUNT_ID="$ACCOUNT_ID" \
-    _SYNC_EMAIL="$EMAIL" \
-    _SYNC_IDENTITY_KEY="$identity_key" \
-    _SYNC_NOW="$now" \
-    python3 -c "
-import json, sqlite3, os
-
-db_path = os.environ['OMP_DB']
-data = json.dumps({
-    'access': os.environ['_SYNC_ACCESS'],
-    'refresh': os.environ['_SYNC_REFRESH'],
-    'expires': int(os.environ['_SYNC_EXPIRES']),
-    'accountId': os.environ['_SYNC_ACCOUNT_ID'],
-    'email': os.environ['_SYNC_EMAIL']
-})
-identity_key = os.environ['_SYNC_IDENTITY_KEY']
-now = int(os.environ['_SYNC_NOW'])
-
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-cur.execute(
-    '''UPDATE auth_credentials
-       SET disabled_cause = 'replaced by sync-ai-auth', updated_at = ?
-       WHERE provider = 'openai-codex' AND disabled_cause IS NULL''',
-    (now,)
-)
-cur.execute(
-    '''INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at)
-       VALUES ('openai-codex', 'oauth', ?, ?, ?, ?)''',
-    (data, identity_key, now, now)
-)
-conn.commit()
-conn.close()
-"
+    python3 "$SCRIPT_DIR/lib/vault_backends.py" write-omp \
+        --db "$OMP_DB" \
+        --access "$ACCESS_TOKEN" \
+        --refresh "$REFRESH_TOKEN" \
+        --expires "$EXPIRES" \
+        --account-id "$ACCOUNT_ID" \
+        --email "$EMAIL" \
+        --replaced-by "sync-ai-auth"
 }
 
 write_to_pi() {
@@ -163,37 +131,12 @@ write_to_pi() {
         return 1
     fi
 
-    _SYNC_ACCESS="$ACCESS_TOKEN" \
-    _SYNC_REFRESH="$REFRESH_TOKEN" \
-    _SYNC_EXPIRES="$EXPIRES" \
-    _SYNC_ACCOUNT_ID="$ACCOUNT_ID" \
-    _SYNC_PI_AUTH="$PI_AUTH" \
-    python3 -c "
-import json, os
-
-auth_path = os.environ['_SYNC_PI_AUTH']
-
-# baca auth.json yang ada, preserve key lain selain openai-codex
-existing = {}
-if os.path.isfile(auth_path):
-    try:
-        with open(auth_path) as f:
-            existing = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        pass
-
-existing['openai-codex'] = {
-    'type': 'oauth',
-    'access': os.environ['_SYNC_ACCESS'],
-    'refresh': os.environ['_SYNC_REFRESH'],
-    'expires': int(os.environ['_SYNC_EXPIRES']),
-    'accountId': os.environ['_SYNC_ACCOUNT_ID']
-}
-
-with open(auth_path, 'w') as f:
-    json.dump(existing, f, indent=2)
-    f.write('\n')
-"
+    python3 "$SCRIPT_DIR/lib/vault_backends.py" write-pi \
+        --path "$PI_AUTH" \
+        --access "$ACCESS_TOKEN" \
+        --refresh "$REFRESH_TOKEN" \
+        --expires "$EXPIRES" \
+        --account-id "$ACCOUNT_ID"
 }
 
 get_token_info() {

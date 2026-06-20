@@ -16,7 +16,8 @@ COCKPIT_ACCOUNTS="$HOME/.antigravity_cockpit/accounts.json"
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'
 B='\033[1m'; D='\033[2m'; N='\033[0m'
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/vault-profiles.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/vault-profiles.sh"
 vault_ensure_dir
 vault_migrate
 
@@ -255,7 +256,6 @@ detail_openai() {
     local target
     target=$(printf '%s\n' "omp + pi" "omp saja" "pi saja" | fzf --prompt="  Target > " --height=8 --reverse 2>/dev/null) || return
 
-    local now; now=$(date +%s)
     local done_targets=()
     local apply_omp=false apply_pi=false
     case "$target" in
@@ -265,46 +265,33 @@ detail_openai() {
     esac
 
     if [[ "$apply_omp" == "true" && -f "$OMP_DB" ]]; then
-        OMP_DB="$OMP_DB" _A="$access" _R="$refresh" _E="$expires" _AI="$account_id" _EM="$email" _IK="email:$email" _N="$now" \
-        python3 -c "
-import json, sqlite3, os
-db=os.environ['OMP_DB']
-data=json.dumps({'access':os.environ['_A'],'refresh':os.environ['_R'],'expires':int(os.environ['_E']),'accountId':os.environ['_AI'],'email':os.environ['_EM']})
-ik=os.environ['_IK']; now=int(os.environ['_N'])
-c=sqlite3.connect(db); cur=c.cursor()
-cur.execute('UPDATE auth_credentials SET disabled_cause=\"replaced by auth-vault\", updated_at=? WHERE provider=\"openai-codex\" AND disabled_cause IS NULL',(now,))
-cur.execute('INSERT INTO auth_credentials (provider,credential_type,data,identity_key,created_at,updated_at) VALUES (\"openai-codex\",\"oauth\",?,?,?)',(data,ik,now,now))
-c.commit(); c.close()
-" 2>/dev/null && done_targets+=("omp")
+        python3 "$SCRIPT_DIR/lib/vault_backends.py" write-omp \
+            --db "$OMP_DB" \
+            --access "$access" \
+            --refresh "$refresh" \
+            --expires "$expires" \
+            --account-id "$account_id" \
+            --email "$email" \
+            --replaced-by "auth-vault" \
+            2>/dev/null && done_targets+=("omp")
     fi
 
     if [[ "$apply_pi" == "true" && -d "$(dirname "$PI_AUTH")" ]]; then
-        _A="$access" _R="$refresh" _E="$expires" _AI="$account_id" _PA="$PI_AUTH" \
-        python3 -c "
-import json, os
-p=os.environ['_PA']
-ex={}
-try:
-    with open(p) as f: ex=json.load(f)
-except: pass
-ex['openai-codex']={'type':'oauth','access':os.environ['_A'],'refresh':os.environ['_R'],'expires':int(os.environ['_E']),'accountId':os.environ['_AI']}
-with open(p,'w') as f: json.dump(ex,f,indent=2); f.write('\n')
-" 2>/dev/null && done_targets+=("pi")
+        python3 "$SCRIPT_DIR/lib/vault_backends.py" write-pi \
+            --path "$PI_AUTH" \
+            --access "$access" \
+            --refresh "$refresh" \
+            --expires "$expires" \
+            --account-id "$account_id" \
+            2>/dev/null && done_targets+=("pi")
     fi
 
     if [[ -f "$COCKPIT_CURRENT" ]]; then
-        _CID="$chosen_id" _CP="$COCKPIT_CURRENT" \
-        python3 -c "
-import json, os
-p=os.environ['_CP']
-ex={}
-try:
-    with open(p) as f: ex=json.load(f)
-except: pass
-if 'current_accounts' not in ex: ex['current_accounts']={}
-ex['current_accounts']['codex']=os.environ['_CID']
-with open(p,'w') as f: json.dump(ex,f,indent=2); f.write('\n')
-" 2>/dev/null
+        python3 "$SCRIPT_DIR/lib/vault_backends.py" update-cockpit-current \
+            --path "$COCKPIT_CURRENT" \
+            --provider "codex" \
+            --account-id "$chosen_id" \
+            2>/dev/null
     fi
 
     echo ""
