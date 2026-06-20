@@ -38,7 +38,7 @@ remaining_bar() {
 # Handles UTF-8 byte-width correctly (─ is 3 bytes but 1 display column)
 hline() {
     local count="${1:-10}"
-    local char="$2"
+    local char="${2:-}"
     [[ -z "$char" ]] && char="─"
     local result=""
     for ((i=0; i<count; i++)); do result+="$char"; done
