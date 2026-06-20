@@ -119,19 +119,17 @@ fetch_codex_quota() {
     [[ -n "$account_id" ]] && curl_args+=(-H "chatgpt-account-id: $account_id")
     local response
     response=$(curl "${curl_args[@]}" "https://chatgpt.com/backend-api/wham/usage" 2>/dev/null) || { echo "?|?|?|?"; return; }
-    local h_used w_used h_reset w_reset
-    h_used=$(echo "$response" | jq -r '.rate_limit.primary_window.used_percent // "?"' 2>/dev/null)
-    w_used=$(echo "$response" | jq -r '.rate_limit.secondary_window.used_percent // "?"' 2>/dev/null)
-    h_reset=$(echo "$response" | jq -r '.rate_limit.primary_window.reset_at // "?"' 2>/dev/null)
-    w_reset=$(echo "$response" | jq -r '.rate_limit.secondary_window.reset_at // "?"' 2>/dev/null)
-    [[ "$h_used" == "?" && "$w_used" == "?" && "$h_reset" == "?" && "$w_reset" == "?" ]] && { echo "?|?|?|?"; return; }
-    echo "${h_used:-?}|${w_used:-?}|${h_reset:-?}|${w_reset:-?}"
+    # Single jq call: extract all 4 fields, pipe-joined (was 5 separate jq calls)
+    local result
+    result=$(echo "$response" | jq -r '[.rate_limit.primary_window.used_percent // "?", .rate_limit.secondary_window.used_percent // "?", .rate_limit.primary_window.reset_at // "?", .rate_limit.secondary_window.reset_at // "?"] | join("|")' 2>/dev/null)
+    [[ -z "$result" || "$result" == "?|?|?|?" ]] && { echo "?|?|?|?"; return; }
+    echo "$result"
 }
 fetch_codex_quota_cached() {
     local token="$1" account_id="${2:-}"
     local cache_dir="${AUTH_VAULT_CACHE_DIR:-$HOME/.cache/auth-vault}"
     local ttl="${AUTH_VAULT_QUOTA_TTL:-60}"
-    local key; key=$(printf '%s' "${token}|${account_id}" | md5sum | cut -d' ' -f1)
+    local key; key=$(printf '%s' "${token}|${account_id}" | md5sum); key="${key%% *}"
     local cache_file="$cache_dir/quota_${key}.json"
     mkdir -p "$cache_dir" 2>/dev/null || true
 
@@ -142,7 +140,8 @@ fetch_codex_quota_cached() {
         now=$(date +%s)
         age=$(( now - mtime ))
         if (( age < ttl )); then
-            local cached; cached=$(cat "$cache_file" 2>/dev/null)
+            local cached
+            read -r cached < "$cache_file" 2>/dev/null || true
             # Validate shape: 4 pipe-separated non-empty fields
             if [[ "$cached" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+$ ]]; then
                 echo "$cached"
@@ -163,7 +162,8 @@ fetch_codex_quota_cached() {
 
     # API failed: graceful degradation — return stale cache if available
     if [[ -f "$cache_file" ]]; then
-        local cached; cached=$(cat "$cache_file" 2>/dev/null)
+        local cached
+        read -r cached < "$cache_file" 2>/dev/null || true
         if [[ "$cached" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+$ ]]; then
             echo "$cached"
             return
@@ -175,28 +175,29 @@ fetch_codex_quota_cached() {
 fetch_codex_quota_parallel() {
     local outfile="$1"; shift
     : > "$outfile"
-    if [[ $# -eq 0 ]]; then return 0; fi
-    if (( $# % 2 != 0 )); then return 1; fi
+    [[ $# -eq 0 ]] && return 0
+    (( $# % 2 == 0 )) || return 1
     local n=$(( $# / 2 ))
-    local workdir; workdir=$(mktemp -d)
+    local tmpdir; tmpdir=$(mktemp -d)
     local i=0
     while (( i < n )); do
         local tok="$1" acct="$2"; shift 2
         (
             local r; r=$(fetch_codex_quota_cached "$tok" "$acct")
-            printf '%s\n' "$r" > "$workdir/$i"
+            printf '%s\n' "$r" > "$tmpdir/$i"
         ) &
         (( ++i ))
     done
     wait
     for (( i = 0; i < n; i++ )); do
-        if [[ -f "$workdir/$i" ]]; then
-            cat "$workdir/$i"
+        if [[ -f "$tmpdir/$i" ]]; then
+            read -r line < "$tmpdir/$i" || true
+            echo "$line"
         else
             echo "?|?|?|?"
         fi
     done > "$outfile"
-    rm -rf "$workdir"
+    rm -rf "$tmpdir"
     return 0
 }
 fetch_codex_reset() {
