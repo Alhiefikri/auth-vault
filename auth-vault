@@ -122,9 +122,11 @@ dashboard() {
     header
     echo -e "  ${B}📊 DASHBOARD${N}"
     echo ""
-    sep
-    printf "  ${C}%-10s${N}  %-28s  %-6s  %-5s  %s\n" "Tool" "Akun Aktif" "Plan" "Token" "Usage"
-    sep
+    local hl; hl=$(hline 28)
+    echo -e "  ${D}┌──────────┬─${hl}─┬────────┬─────────┬───────────────────────────┐${N}"
+    printf "  ${D}│${N} ${C}%-8s${N} ${D}│${N} ${C}%-28s${N} ${D}│${N} ${C}%-6s${N} ${D}│${N} ${C}%-7s${N} ${D}│${N} ${C}%-25s${N} ${D}│${N}\n" \
+        "Tool" "Akun Aktif" "Plan" "Token" "Usage"
+    echo -e "  ${D}├──────────┼─${hl}─┼────────┼─────────┼───────────────────────────┤${N}"
 
     # OpenAI row
     if [[ -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
@@ -132,17 +134,25 @@ dashboard() {
         if [[ -n "$cid" && -f "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" ]]; then
             local email; email=$(jq -r '.email // "?"' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
             local token; token=$(jq -r '.tokens.access_token // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
-            local plan="?" exp="?"
+            local plan="?" exp="?" exp_color="$D"
             [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
+            if [[ "$exp" == "expired" ]]; then
+                exp_color="$R"
+            elif [[ "$exp" =~ ^[0-9]+d$ ]]; then
+                local days="${exp%d}"
+                [[ $days -le 1 ]] && exp_color="$R"
+                [[ $days -ge 2 && $days -le 3 ]] && exp_color="$Y"
+                [[ $days -ge 4 ]] && exp_color="$G"
+            fi
             local ud; ud=$(get_codex_usage "$email")
             local h="${ud%%|*}" w="${ud##*|}" bar=""
-            [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 6)"
-            printf "  %-10s  %-28s  %-6s  %-5s  %b\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
+            [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 4)"
+            printf "  ${D}│${N} ${G}%-8s${N} ${D}│${N} %-28s ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
         else
-            printf "  %-10s  ${D}%-28s${N}\n" "OpenAI" "(belum ada akun aktif)"
+            printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun aktif)" "" "" ""
         fi
     else
-        printf "  %-10s  ${R}%-28s${N}\n" "OpenAI" "Cockpit tidak terdeteksi"
+        printf "  ${D}│${N} %-8s ${D}│${N} ${R}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "Cockpit tidak terdeteksi" "" "" ""
     fi
 
     # Qoder row
@@ -157,17 +167,19 @@ dashboard() {
                 local qr; qr=$(echo "$ud" | cut -d'|' -f4)
                 local qt; qt=$(echo "$ud" | cut -d'|' -f3)
                 local qpi=${qp%.*}
-                qbar="cr:$(usage_bar $qpi 6) ${qr}/${qt}"
+                qbar="cr:$(usage_bar $qpi 4) ${qr}/${qt}"
             fi
-            printf "  %-10s  %-28s  %-6s  %-5s  %b\n" "Qoder" "$email" "$plan" "-" "$qbar"
+            printf "  ${D}│${N} ${C}%-8s${N} ${D}│${N} %-28s ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %b  ${D}│${N}\n" "Qoder" "$email" "$plan" "-" "$qbar"
         else
-            printf "  %-10s  ${D}%-28s${N}\n" "Qoder" "(belum ada akun aktif)"
+            printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "Qoder" "(belum ada akun aktif)" "" "" ""
         fi
     else
-        printf "  %-10s  ${D}%-28s${N}\n" "Qoder" "(belum ada akun)"
+        printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "Qoder" "(belum ada akun)" "" "" ""
     fi
 
-    sep
+    echo -e "  ${D}└──────────┴─${hl}─┴────────┴─────────┴───────────────────────────┘${N}"
+    echo ""
+    echo -e "  ${D}github.com/Alhiefikri/auth-vault${N}"
     echo ""
 }
 
@@ -199,27 +211,69 @@ detail_openai() {
         press_enter; return
     fi
 
-    sep
-    printf "  ${C}%-4s${N}  %-28s  %-8s  %s\n" "" "Email" "Plan" "Token"
-    sep
-    echo -e "  ${D}● aktif  ○ cockpit  ${Y}✗${D} tidak di accounts.json${N}"
-    sep
+    # Dynamic email column width: total = 71 + email_col
+    local term_width=${COLUMNS:-100}
+    local max_email=20
+    for email in "${emails[@]}"; do
+        [[ ${#email} -gt $max_email ]] && max_email=${#email}
+    done
+    local email_col=$(( term_width - 71 ))
+    [[ $email_col -lt 20 ]] && email_col=20
+    [[ $email_col -gt $max_email ]] && email_col=$max_email
+
+    local ec_hl; ec_hl=$(hline "$email_col")
+    local bars_hl; bars_hl=$(hline 33)
+
+    # Table header
+    echo ""
+    echo -e "  ${D}┌─────┬─${ec_hl}─┬──────────┬─────────┬─${bars_hl}${N}"
+    printf "  ${D}│${N} ${C}%2s${N}  ${D}│${N} ${C}%-${email_col}s${N} ${D}│${N} ${C}%-8s${N} ${D}│${N} ${C}%-7s${N} ${D}│${N} ${C}%s${N}\n" \
+        "#" "Email" "Plan" "Expire" "Quota Remaining (h / w)"
+    echo -e "  ${D}├─────┼─${ec_hl}─┼──────────┼─────────┼─${bars_hl}${N}"
+
     for i in "${!ids[@]}"; do
-        local marker="○" color="$D"
+        local marker="o" mcolor="$D" ncolor="$D" ecolor="$D"
         if [[ "${ids[$i]}" == "$current_id" ]]; then
-            marker="●"; color="$G"
+            marker="*"; mcolor="$G"; ncolor="$G"; ecolor="$G"
         elif ! is_account_active "${emails[$i]}"; then
-            marker="✗"; color="$Y"
+            marker="x"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         fi
 
         local ud; ud=$(get_codex_usage "${emails[$i]}")
         local h="${ud%%|*}" w="${ud##*|}" bar=""
-        [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 8) w:$(remaining_bar $w 8)"
+        if [[ "$h" != "?" ]]; then
+            bar="h:$(remaining_bar $h 4)  w:$(remaining_bar $w 4)"
+        else
+            bar="${D}─────────────────────────────────${N}"
+        fi
 
-        printf "  ${color}%-4s${N}  %-28s  %-8s  %-5s  %b\n" "$marker" "${emails[$i]}" "${plans[$i]}" "${exps[$i]}" "$bar"
+        # Truncate email
+        local display_email="${emails[$i]}"
+        [[ ${#display_email} -gt $email_col ]] && display_email="${display_email:0:$((email_col-3))}..."
+
+        # Color-coded expiry
+        local exp_display="${exps[$i]}" exp_color="$D"
+        if [[ "$exp_display" == "expired" ]]; then
+            exp_color="$R"
+        elif [[ "$exp_display" =~ ^[0-9]+d$ ]]; then
+            local days="${exp_display%d}"
+            [[ $days -le 1 ]] && exp_color="$R"
+            [[ $days -ge 2 && $days -le 3 ]] && exp_color="$Y"
+            [[ $days -ge 4 ]] && exp_color="$G"
+        fi
+
+        printf "  ${D}│${N} ${mcolor}%s${N}${ncolor}%1s${N} ${D}│${N} ${ecolor}%-${email_col}s${N} ${D}│${N} %-8s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b\n" \
+            "$marker" "$((i+1))" "$display_email" "${plans[$i]}" "$exp_display" "$bar"
     done
-    sep
-    echo -e "  ${D}${#ids[@]} akun terdaftar${N}"
+    echo -e "  ${D}└─────┴─${ec_hl}─┴──────────┴─────────┴─${bars_hl}${N}"
+
+    # Legend
+    echo ""
+    echo -e "  ${G}*${N} aktif (current)   ${D}o${N} cockpit registered   ${Y}x${N} tidak di accounts.json"
+
+    # Footer
+    echo ""
+    echo -e "  ${B}${#ids[@]} akun terdaftar${N}  ${D}│${N}  ${D}github.com/Alhiefikri/auth-vault${N}"
     echo ""
     echo -e "  ${Y}Switch akun [1-${#ids[@]}] atau Enter untuk batal:${N}"
     read -r -p "  > " pick

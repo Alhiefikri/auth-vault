@@ -33,3 +33,29 @@ remaining_bar() {
     for ((i=0; i<empty; i++)); do bar+="░"; done
     echo -e "${color}${bar}${N} ${pct}%"
 }
+
+# Generate a horizontal line of N box-drawing characters (─)
+# Handles UTF-8 byte-width correctly (─ is 3 bytes but 1 display column)
+hline() {
+    local count="${1:-10}"
+    local char="$2"
+    [[ -z "$char" ]] && char="─"
+    local result=""
+    for ((i=0; i<count; i++)); do result+="$char"; done
+    echo "$result"
+}
+
+# Pad a string (which may contain multi-byte UTF-8 characters) to a target display width.
+# Usage: padright "text" 20
+# Returns the text followed by spaces so display width = target.
+padright() {
+    local text="$1"
+    local width="${2:-10}"
+    local dw=${#text}
+    if (( dw >= width )); then
+        echo -n "$text"
+        return
+    fi
+    local pad=$(( width - dw ))
+    printf '%s%*s' "$text" "$pad" ""
+}
