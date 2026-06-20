@@ -1,0 +1,3 @@
+#!/bin/bash
+# qoder-autologin - shim that delegates to qoder-autologin.py
+exec python3 "$(dirname "$0")/qoder-autologin.py" "$@"

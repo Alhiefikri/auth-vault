@@ -179,15 +179,27 @@ cmd_batch_save() {
 
 _find_autologin() {
     for candidate in \
+        "$(dirname "$0")/qoder-autologin.py" \
         "$(dirname "$0")/qoder-autologin" \
+        "$HOME/Github/auth-vault/qoder-autologin.py" \
         "$HOME/Github/auth-vault/qoder-autologin" \
+        "$HOME/.local/bin/qoder-autologin.py" \
         "$HOME/.local/bin/qoder-autologin"; do
-        if [[ -x "$candidate" ]]; then
+        if [[ -f "$candidate" ]]; then
             echo "$candidate"
             return 0
         fi
     done
     return 1
+}
+
+_run_autologin() {
+    local script="$1"; shift
+    if [[ "$script" == *.py ]]; then
+        python3 "$script" "$@"
+    else
+        "$script" "$@"
+    fi
 }
 
 cmd_login() {
@@ -210,7 +222,7 @@ cmd_login() {
 
     local args=("login" "$account")
     [[ -n "$profile" ]] && args+=("$profile")
-    "$autologin" "${args[@]}"
+    _run_autologin "$autologin" "${args[@]}"
 }
 
 cmd_batch_login() {
@@ -229,7 +241,7 @@ cmd_batch_login() {
         exit 1
     fi
 
-    "$autologin" batch "$file"
+    _run_autologin "$autologin" batch "$file"
 }
 
 main() {

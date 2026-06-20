@@ -500,12 +500,15 @@ autologin_qoder() {
     echo ""
 
     local AUTOLOGIN_SCRIPT=""
-    # Find the autologin script
+    # Find the autologin script (prefer Python script, fall back to shim)
     for candidate in \
+        "$(dirname "$0")/qoder-autologin.py" \
         "$(dirname "$0")/qoder-autologin" \
+        "$HOME/Github/auth-vault/qoder-autologin.py" \
         "$HOME/Github/auth-vault/qoder-autologin" \
+        "$HOME/.local/bin/qoder-autologin.py" \
         "$HOME/.local/bin/qoder-autologin"; do
-        if [[ -x "$candidate" ]]; then
+        if [[ -f "$candidate" && -x "$candidate" ]] || [[ "$candidate" == *.py && -f "$candidate" ]]; then
             AUTOLOGIN_SCRIPT="$candidate"
             break
         fi
@@ -517,6 +520,15 @@ autologin_qoder() {
         press_enter
         return
     fi
+
+    # Helper: invoke the autologin script (python3 for .py, direct for bash shim)
+    _run_autologin() {
+        if [[ "$AUTOLOGIN_SCRIPT" == *.py ]]; then
+            python3 "$AUTOLOGIN_SCRIPT" "$@"
+        else
+            "$AUTOLOGIN_SCRIPT" "$@"
+        fi
+    }
 
     # Check dependencies
     if ! command -v python3 &>/dev/null; then
@@ -532,7 +544,7 @@ autologin_qoder() {
         echo -e "  ${Y}Install sekarang? [y/N]${N}"
         read -r install_ans
         if [[ "${install_ans,,}" == "y" ]]; then
-            "$AUTOLOGIN_SCRIPT" setup
+            _run_autologin setup
             press_enter
             return
         else
@@ -567,7 +579,7 @@ autologin_qoder() {
             read -r profile
             profile="${profile:-$default_profile}"
             echo ""
-            "$AUTOLOGIN_SCRIPT" login "$account" "$profile"
+            _run_autologin login "$account" "$profile"
             press_enter
             ;;
         2)
@@ -586,11 +598,11 @@ autologin_qoder() {
                 return
             fi
             echo ""
-            "$AUTOLOGIN_SCRIPT" batch "$filepath"
+            _run_autologin batch "$filepath"
             press_enter
             ;;
         3)
-            "$AUTOLOGIN_SCRIPT" interactive
+            _run_autologin interactive
             press_enter
             ;;
         *)

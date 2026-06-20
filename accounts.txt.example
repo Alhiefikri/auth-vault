@@ -1,0 +1,11 @@
+# Qoder Auto-Login - Account Template
+# Format: email:password (one per line)
+# Lines starting with # are ignored
+# Blank lines are ignored
+#
+# Copy this file to accounts.txt and fill in your accounts:
+#   cp accounts.txt.example accounts.txt
+#
+# Example:
+# john.doe@gmail.com:MyPassword123
+# jane.smith@gmail.com:AnotherPassword456

@@ -1,6 +1,13 @@
 # Auth Vault data (contains tokens and credentials)
 .auth-vault/
 
+# Accounts file (contains credentials)
+accounts.txt
+
+# Python
+__pycache__/
+*.pyc
+
 # OS files
 .DS_Store
 Thumbs.db
