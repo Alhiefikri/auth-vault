@@ -1,0 +1,607 @@
+#!/bin/bash
+# Auth Vault - TUI Credential Manager for AI Coding Tools
+# Manages OpenAI (OMP, Pi, OpenCode, Codex) and Qoder CLI accounts
+
+set -euo pipefail
+
+# === PATHS ===
+VAULT_DIR="$HOME/.auth-vault"
+VAULT_OPENAI="$VAULT_DIR/openai"
+VAULT_QODER="$VAULT_DIR/qoder"
+OMP_DB="$HOME/.omp/agent/agent.db"
+PI_AUTH="$HOME/.pi/agent/auth.json"
+OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
+CODEX_AUTH="$HOME/.codex/auth.json"
+QODER_AUTH="$HOME/.qoder/.auth/user"
+COCKPIT_CURRENT="$HOME/.antigravity_cockpit/provider_current_accounts.json"
+COCKPIT_CODEX_ACCOUNTS="$HOME/.antigravity_cockpit/codex_accounts"
+COCKPIT_QODER_ACCOUNTS="$HOME/.antigravity_cockpit/qoder_accounts"
+
+# === COLORS ===
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'
+B='\033[1m'; D='\033[2m'; N='\033[0m'
+BG_G='\033[42m'; BG_R='\033[41m'; BG_C='\033[46m'; BG_Y='\033[43m'
+
+mkdir -p "$VAULT_OPENAI" "$VAULT_QODER"
+
+# === JWT HELPERS ===
+jwt_decode() {
+    echo "$1" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true
+}
+
+jwt_email() {
+    local p; p=$(jwt_decode "$1")
+    echo "$p" | jq -r '."https://api.openai.com/profile".email // "?"' 2>/dev/null
+}
+
+jwt_plan() {
+    local p; p=$(jwt_decode "$1")
+    echo "$p" | jq -r '."https://api.openai.com/auth".chatgpt_plan_type // "?"' 2>/dev/null
+}
+
+jwt_exp_days() {
+    local p; p=$(jwt_decode "$1")
+    local exp; exp=$(echo "$p" | jq -r '.exp // 0' 2>/dev/null)
+    local now; now=$(date +%s)
+    if [[ "$exp" -gt "$now" ]]; then
+        echo "$(( (exp - now) / 86400 ))d"
+    else
+        echo "expired"
+    fi
+}
+
+# === UI HELPERS ===
+header() {
+    clear
+    local term_width=${COLUMNS:-80}
+    local art_width=53
+    local pad=$(( (term_width - art_width) / 2 ))
+    [[ $pad -lt 0 ]] && pad=0
+    local p; p=$(printf '%*s' "$pad" '')
+
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣾⠓⠶⣤⠀⠀⠀⠀⣠⠶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⠇⠀⢠⡏⠀⠀⢀⡔⠉⠀⢈⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠩⠤⣄⣼⠁⠀⣠⠟⠀⠀⣠⠏⠀⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⢀⣀⣀⣀⣀⣀⣀⣀⠀⠀⠀⠁⠀⠀⠣⣤⣀⡼⠃⠀⢀⡴⠋⠈⠳⡄⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${C}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣴⣶⣿⡿⠿⠿⠟⠛⠛⠛⠛⠿⠿⣿⣿⣶⣤⣄⠀⠀⠀⠉⠀⢀⡴⠋⠀⠀⣠⠞⠁⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${C}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣾⣿⠿⠋⠉⢀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠻⢿⣿⣶⣄⠀⠀⠳⣄⠀⣠⠞⢁⡠⢶⡄⠀⠀⠀⠀${N}"
+    echo -e "${p}${C}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⣿⠿⠋⠀⠀⢀⣴⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠑⢤⡈⠛⢿⣿⣦⡀⠈⠛⢡⠚⠃⠀⠀⢹⡆⠀⠀⠀${N}"
+    echo -e "${p}${B}⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⣿⠟⠁⠀⠀⠀⢀⣾⠃⠀⠀⢀⡀⠀⠀⠀⠀⠀⠀⠀⠀⢻⡆⠀⠀⢻⣦⠀⠙⢿⣿⣦⡀⠈⢶⣀⡴⠞⠋⠀⠀⠀⠀${N}"
+    echo -e "${p}${B}⠀⠀⠀⠀⠀⠀⠀⣠⣿⡿⠃⠀⠀⠀⠀⢀⣾⡇⢀⡄⠀⢸⡇⠀⠀⠀⠀⠀⠀⣀⠀⢸⣷⡀⠀⠀⠹⣷⡀⠀⠙⢿⣷⡀⠀⠉⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${B}⠀⠀⠀⠀⠀⠀⣰⣿⡟⠀⠀⠀⠀⠀⠀⣾⣿⠃⣼⡇⠀⢸⡇⠀⠀⠀⠀⠀⠀⣿⠀⢸⣿⣷⡀⠀⢀⣾⣿⡤⠐⠊⢻⣿⡀⠀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${Y}⠀⠀⠀⠀⠀⢠⣿⣿⣼⡇⠀⠀⠀⠀⢠⣿⠉⢠⣿⠧⠀⣸⣇⣠⡄⠀⠀⠀⠀⣿⠠⢸⡟⠹⣿⡍⠉⣿⣿⣧⠀⠀⠀⠻⣿⣶⣄⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${Y}⠀⠀⠀⠀⠀⢸⣿⣿⡟⠀⠀⠀⠀⠀⣼⡏⢠⡿⣿⣦⣤⣿⡿⣿⡇⠀⠀⠀⢸⡿⠻⣿⣧⣤⣼⣿⡄⢸⡿⣿⡇⠀⠀⢠⣌⠛⢿⣿⣶⣤⣤⣄⡀${N}"
+    echo -e "${p}${R}⠀⠀⠀⣀⣤⣿⣿⠟⣀⠀⠀⠀⠀⠀⣿⢃⣿⠇⢿⣯⣿⣿⣇⣿⠁⠀⠀⠀⣾⡇⢸⣿⠃⠉⠁⠸⣿⣼⡇⢻⡇⠀⠀⠀⢿⣷⣶⣬⣭⣿⣿⣿⠇${N}"
+    echo -e "${p}${R}⣾⣿⣿⣿⣿⣻⣥⣾⡇⠀⠀⠀⠀⠀⣿⣿⠇⠀⠘⠿⠋⠻⠿⠿⠶⠶⠾⠿⠿⠍⢛⣧⣰⠶⢀⣀⣼⣿⣴⡸⣿⠀⠀⠀⠸⣿⣿⣿⠉⠛⠉⠀⠀${N}"
+    echo -e "${p}${R}⠘⠛⠿⠿⢿⣿⠉⣿⠁⠀⠀⠀⠀⢀⣿⡿⣶⣶⣶⣤⣤⣤⣀⣀⠀⠀⠀⠀⠀⠀⢀⣭⣶⣿⡿⠟⠋⠉⠀⠀⣿⠀⡀⡀⠀⣿⣿⣿⡆⠀⠀⠀⠀${N}"
+    echo -e "${p}${Y}⠀⠀⠀⠀⣼⣿⠀⣿⠀⠀⠸⠀⠀⠸⣿⠇⠀⠀⣈⣩⣭⣿⡿⠟⠃⠀⠀⠀⠀⠀⠙⠛⠛⠛⠛⠻⠿⠷⠆⠀⣯⠀⠇⡇⠀⣿⡏⣿⣧⠀⠀⠀⠀${N}"
+    echo -e "${p}${Y}⠀⠀⠀⠀⢿⣿⡀⣿⡆⠀⠀⠀⠀⠀⣿⠰⠿⠿⠛⠋⠉⠀⠀⢀⣴⣶⣶⣶⣶⣶⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⢹⣧⠀⠀⠀⣿⡇⣿⣿⠀⠀⠀⠀${N}"
+    echo -e "${p}${B}⠀⠀⠀⠀⢸⣿⡇⢻⣇⠀⠘⣰⡀⠀⣿⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⠀⠀⠀⠀⢸⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣿⠀⠀⠀⣿⣧⣿⡿⠀⠀⠀⠀${N}"
+    echo -e "${p}${B}⠀⠀⠀⠀⠈⣿⣧⢸⣿⡀⠀⡿⣧⠀⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⣿⡄⠀⠀⠀⣼⡇⠀⠀⠀⠀⠀⠀⢀⣤⣾⡟⢡⣶⠀⢠⣿⣿⣿⠃⠀⠀⠀⠀${N}"
+    echo -e "${p}${C}⠀⠀⠀⠀⠀⠹⣿⣿⣿⣷⠀⠇⢹⣷⡸⣿⣶⣦⣄⣀⡀⠀⠀⠀⣿⡇⠀⠀⢠⣿⠁⣀⣀⣠⣤⣶⣾⡿⢿⣿⡇⣼⣿⢀⣿⣿⠿⠏⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${C}⠀⠀⠀⠀⠀⠀⠈⠛⠛⣿⣷⣴⠀⢹⣿⣿⣿⡟⠿⠿⣿⣿⣿⣿⣾⣷⣶⣿⣿⣿⣿⡿⠿⠟⠛⠋⠉⠀⢸⣿⣿⣿⣿⣾⣿⠃⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢿⣿⣦⣘⣿⡿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⠛⠛⠻⠿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo -e "${p}${D}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠻⣿⣿⣿⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀${N}"
+    echo ""
+    echo -e "${B}${C}  ╔══════════════════════════════════════════════════════════╗${N}"
+    echo -e "${B}${C}  ║         🔐 AUTH VAULT - AI Account Manager              ║${N}"
+    echo -e "${B}${C}  ╚══════════════════════════════════════════════════════════╝${N}"
+    echo ""
+}
+
+sep() {
+    echo -e "  ${D}────────────────────────────────────────────────────────${N}"
+}
+
+press_enter() {
+    echo ""
+    echo -e "  ${D}Press Enter untuk kembali...${N}"
+    read -r
+}
+
+usage_bar() {
+    local pct=$1
+    local width=${2:-10}
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+    local color="$G"
+    [[ $pct -ge 60 ]] && color="$Y"
+    [[ $pct -ge 85 ]] && color="$R"
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    echo -e "${color}${bar}${N} ${pct}%"
+}
+
+get_codex_usage() {
+    local email="$1"
+    [[ "$email" == "?" ]] && { echo "?|?"; return; }
+    for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
+        [[ -f "$f" ]] || continue
+        local femail; femail=$(jq -r '.email // ""' "$f" 2>/dev/null)
+        if [[ "$femail" == "$email" ]]; then
+            local h; h=$(jq -r '.quota.hourly_percentage // "?"' "$f" 2>/dev/null)
+            local w; w=$(jq -r '.quota.weekly_percentage // "?"' "$f" 2>/dev/null)
+            echo "${h}|${w}"
+            return
+        fi
+    done
+    echo "?|?"
+}
+
+get_qoder_usage() {
+    local email="$1"
+    [[ "$email" == "?" || "$email" == "(none)" ]] && { echo "?"; return; }
+    for f in "$COCKPIT_QODER_ACCOUNTS"/qoder_uid_*.json; do
+        [[ -f "$f" ]] || continue
+        local femail; femail=$(jq -r '.email // ""' "$f" 2>/dev/null)
+        if [[ "$femail" == "$email" ]]; then
+            local pct; pct=$(jq -r '.credits_usage_percent // 0' "$f" 2>/dev/null)
+            local used; used=$(jq -r '.credits_used // 0' "$f" 2>/dev/null)
+            local total; total=$(jq -r '.credits_total // 0' "$f" 2>/dev/null)
+            local remain; remain=$(jq -r '.credits_remaining // 0' "$f" 2>/dev/null)
+            echo "${pct}|${used}|${total}|${remain}"
+            return
+        fi
+    done
+    echo "?|?|?|?"
+}
+
+# === DASHBOARD ===
+dashboard() {
+    header
+    echo -e "  ${B}📊 DASHBOARD${N}"
+    echo ""
+    sep
+    printf "  ${C}%-11s${N}  %-28s  %-6s  %-5s  %s\n" "App" "Akun" "Plan" "Token" "Usage"
+    sep
+
+    # OMP
+    local omp_email="?" omp_plan="?" omp_exp="?"
+    if [[ -f "$OMP_DB" ]]; then
+        local t; t=$(sqlite3 "$OMP_DB" "SELECT json_extract(data,'$.access') FROM auth_credentials WHERE provider='openai-codex' AND disabled_cause IS NULL ORDER BY id DESC LIMIT 1;" 2>/dev/null || true)
+        if [[ -n "$t" ]]; then omp_email=$(jwt_email "$t"); omp_plan=$(jwt_plan "$t"); omp_exp=$(jwt_exp_days "$t"); fi
+    fi
+    local omp_usage; omp_usage=$(get_codex_usage "$omp_email")
+    local omp_h="${omp_usage%%|*}"; omp_w="${omp_usage##*|}"
+    local omp_bar=""
+    if [[ "$omp_h" != "?" ]]; then
+        omp_bar="h:$(usage_bar $omp_h 8) w:$(usage_bar $omp_w 8)"
+    fi
+    printf "  %-11s  %-28s  %-6s  %-5s  %b\n" "omp" "$omp_email" "$omp_plan" "$omp_exp" "$omp_bar"
+
+    # Pi
+    local pi_email="?" pi_plan="?" pi_exp="?"
+    if [[ -f "$PI_AUTH" ]]; then
+        local t; t=$(jq -r '."openai-codex".access // empty' "$PI_AUTH" 2>/dev/null || true)
+        if [[ -n "$t" ]]; then pi_email=$(jwt_email "$t"); pi_plan=$(jwt_plan "$t"); pi_exp=$(jwt_exp_days "$t"); fi
+    fi
+    local pi_usage; pi_usage=$(get_codex_usage "$pi_email")
+    local pi_h="${pi_usage%%|*}"; pi_w="${pi_usage##*|}"
+    local pi_bar=""
+    if [[ "$pi_h" != "?" ]]; then
+        pi_bar="h:$(usage_bar $pi_h 8) w:$(usage_bar $pi_w 8)"
+    fi
+    printf "  %-11s  %-28s  %-6s  %-5s  %b\n" "pi" "$pi_email" "$pi_plan" "$pi_exp" "$pi_bar"
+
+    # OpenCode
+    local oc_email="?" oc_plan="?" oc_exp="?"
+    if [[ -f "$OPENCODE_AUTH" ]]; then
+        local t; t=$(jq -r '.openai.access // empty' "$OPENCODE_AUTH" 2>/dev/null || true)
+        if [[ -n "$t" ]]; then oc_email=$(jwt_email "$t"); oc_plan=$(jwt_plan "$t"); oc_exp=$(jwt_exp_days "$t"); fi
+    fi
+    local oc_usage; oc_usage=$(get_codex_usage "$oc_email")
+    local oc_h="${oc_usage%%|*}"; oc_w="${oc_usage##*|}"
+    local oc_bar=""
+    if [[ "$oc_h" != "?" ]]; then
+        oc_bar="h:$(usage_bar $oc_h 8) w:$(usage_bar $oc_w 8)"
+    fi
+    printf "  %-11s  %-28s  %-6s  %-5s  %b\n" "opencode" "$oc_email" "$oc_plan" "$oc_exp" "$oc_bar"
+
+    # Codex
+    local cx_email="?" cx_plan="?" cx_exp="?"
+    if [[ -f "$CODEX_AUTH" ]]; then
+        local t; t=$(jq -r '.tokens.access_token // empty' "$CODEX_AUTH" 2>/dev/null || true)
+        if [[ -n "$t" ]]; then cx_email=$(jwt_email "$t"); cx_plan=$(jwt_plan "$t"); cx_exp=$(jwt_exp_days "$t"); fi
+    fi
+    local cx_usage; cx_usage=$(get_codex_usage "$cx_email")
+    local cx_h="${cx_usage%%|*}"; cx_w="${cx_usage##*|}"
+    local cx_bar=""
+    if [[ "$cx_h" != "?" ]]; then
+        cx_bar="h:$(usage_bar $cx_h 8) w:$(usage_bar $cx_w 8)"
+    fi
+    printf "  %-11s  %-28s  %-6s  %-5s  %b\n" "codex" "$cx_email" "$cx_plan" "$cx_exp" "$cx_bar"
+
+    # Qoder CLI
+    local q_profile="(none)" q_email="?"
+    q_profile=$(cat "$VAULT_QODER/.current" 2>/dev/null || echo "(none)")
+    if [[ -f "$COCKPIT_CURRENT" ]]; then
+        local qid; qid=$(jq -r '.current_accounts.qoder // empty' "$COCKPIT_CURRENT" 2>/dev/null || true)
+        if [[ -n "$qid" ]]; then q_email=$(jq -r '.email // "?"' "$COCKPIT_QODER_ACCOUNTS/${qid}.json" 2>/dev/null || echo "?"); fi
+    fi
+    local q_plan="?"
+    if [[ "$q_email" != "?" ]]; then
+        for f in "$COCKPIT_QODER_ACCOUNTS"/qoder_uid_*.json; do
+            [[ -f "$f" ]] || continue
+            local fe; fe=$(jq -r '.email // ""' "$f" 2>/dev/null)
+            if [[ "$fe" == "$q_email" ]]; then q_plan=$(jq -r '.plan_type // "?"' "$f" 2>/dev/null); break; fi
+        done
+    fi
+    local q_usage; q_usage=$(get_qoder_usage "$q_email")
+    local q_pct="${q_usage%%|*}"
+    local q_bar=""
+    if [[ "$q_pct" != "?" ]]; then
+        local q_remain; q_remain=$(echo "$q_usage" | cut -d'|' -f4)
+        local q_total; q_total=$(echo "$q_usage" | cut -d'|' -f3)
+        local q_pct_int=${q_pct%.*}
+        q_bar="cr:$(usage_bar $q_pct_int 8) ${q_remain}/${q_total}"
+    fi
+    printf "  %-11s  %-28s  %-6s  %-5s  %b\n" "qodercli" "$q_email" "$q_plan" "p:$q_profile" "$q_bar"
+
+    sep
+
+    # Sync status
+    local emails=("$omp_email" "$pi_email" "$oc_email" "$cx_email")
+    local uniq; uniq=$(printf '%s\n' "${emails[@]}" | grep -v '?' | sort -u | wc -l)
+    if [[ "$uniq" -le 1 && "$uniq" -gt 0 ]]; then
+        echo -e "  ${G}✓ OpenAI apps sync${N}"
+    elif [[ "$uniq" -gt 1 ]]; then
+        echo -e "  ${Y}⚠ OpenAI apps beda akun${N}"
+    fi
+
+    # Vault stats
+    local oc; oc=$(find "$VAULT_OPENAI" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l)
+    local qc; qc=$(find "$VAULT_QODER" -maxdepth 1 -type f ! -name '.current' ! -name '*.meta.json' 2>/dev/null | wc -l)
+    echo -e "  ${D}Vault: ${oc} OpenAI + ${qc} Qoder profiles${N}"
+    echo ""
+}
+
+# === SAVE OPENAI ACCOUNT ===
+save_openai() {
+    header
+    echo -e "  ${B}➕ Simpan Akun OpenAI${N}"
+    echo ""
+    echo -e "  ${D}Pilih sumber:${N}"
+    echo ""
+
+    local sources=()
+    [[ -f "$OPENCODE_AUTH" ]] && sources+=("opencode  → $(jq -r '.openai.access // empty' "$OPENCODE_AUTH" 2>/dev/null | { read -r t; [[ -n "$t" ]] && jwt_email "$t" || echo "?"; })")
+    [[ -f "$CODEX_AUTH" ]] && sources+=("codex     → $(jq -r '.tokens.access_token // empty' "$CODEX_AUTH" 2>/dev/null | { read -r t; [[ -n "$t" ]] && jwt_email "$t" || echo "?"; })")
+
+    if [[ ${#sources[@]} -eq 0 ]]; then
+        echo -e "  ${R}Tidak ada sumber auth OpenAI yang ditemukan.${N}"
+        press_enter; return
+    fi
+
+    local src
+    src=$(printf '%s\n' "${sources[@]}" | fzf --prompt="  Pilih sumber > " --height=10 --reverse 2>/dev/null) || return
+    local source_type="${src%% *}"
+
+    local access="" refresh="" expires="" account_id="" email=""
+    case "$source_type" in
+        opencode)
+            access=$(jq -r '.openai.access' "$OPENCODE_AUTH")
+            refresh=$(jq -r '.openai.refresh' "$OPENCODE_AUTH")
+            expires=$(jq -r '.openai.expires' "$OPENCODE_AUTH")
+            account_id=$(jq -r '.openai.accountId // ""' "$OPENCODE_AUTH")
+            email=$(jwt_email "$access")
+            ;;
+        codex)
+            access=$(jq -r '.tokens.access_token' "$CODEX_AUTH")
+            refresh=$(jq -r '.tokens.refresh_token' "$CODEX_AUTH")
+            local p; p=$(jwt_decode "$access")
+            expires=$(( $(echo "$p" | jq -r '.exp // 0' 2>/dev/null) * 1000 ))
+            account_id=$(jq -r '.tokens.account_id // ""' "$CODEX_AUTH")
+            email=$(jwt_email "$access")
+            ;;
+    esac
+
+    echo ""
+    echo -e "  ${G}Sumber:${N} $source_type"
+    echo -e "  ${G}Email:${N}  $email"
+    echo -e "  ${G}Plan:${N}   $(jwt_plan "$access")"
+    echo ""
+
+    local name
+    echo -e "  ${Y}Nama profile (contoh: akun-utama):${N}"
+    read -r -p "  > " name
+    [[ -z "$name" ]] && { echo -e "  ${R}Dibatalkan.${N}"; press_enter; return; }
+
+    python3 -c "
+import json, sys
+d = {
+    'name': sys.argv[1],
+    'email': sys.argv[2],
+    'plan': sys.argv[3],
+    'source': sys.argv[4],
+    'access': sys.argv[5],
+    'refresh': sys.argv[6],
+    'expires': int(sys.argv[7]),
+    'accountId': sys.argv[8],
+    'saved_at': $(date +%s)
+}
+with open(sys.argv[9], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" "$name" "$email" "$(jwt_plan "$access")" "$source_type" "$access" "$refresh" "$expires" "$account_id" "$VAULT_OPENAI/${name}.json"
+
+    echo -e "  ${G}✓ Profile '$name' disimpan!${N}"
+    press_enter
+}
+
+# === SAVE QODER ACCOUNT ===
+save_qoder() {
+    header
+    echo -e "  ${B}➕ Simpan Akun Qoder CLI${N}"
+    echo ""
+
+    if [[ ! -f "$QODER_AUTH" ]]; then
+        echo -e "  ${R}File auth Qoder CLI belum ada: $QODER_AUTH${N}"
+        echo -e "  ${D}Login dulu: qodercli login${N}"
+        press_enter; return
+    fi
+
+    # Try to get email from cockpit
+    local email="(unknown)"
+    if [[ -f "$COCKPIT_CURRENT" ]]; then
+        local qid; qid=$(jq -r '.current_accounts.qoder // empty' "$COCKPIT_CURRENT" 2>/dev/null || true)
+        if [[ -n "$qid" ]]; then email=$(jq -r '.email // "?"' "$COCKPIT_QODER_ACCOUNTS/${qid}.json" 2>/dev/null || echo "?"); fi
+    fi
+
+    echo -e "  ${G}Auth file:${N} $QODER_AUTH"
+    echo -e "  ${G}Cockpit:${N}   $email"
+    echo ""
+
+    local name
+    echo -e "  ${Y}Nama profile (contoh: akun-utama):${N}"
+    read -r -p "  > " name
+    [[ -z "$name" ]] && { echo -e "  ${R}Dibatalkan.${N}"; press_enter; return; }
+
+    cp "$QODER_AUTH" "$VAULT_QODER/$name"
+    echo "$name" > "$VAULT_QODER/.current"
+
+    # Save metadata
+    python3 -c "
+import json, sys
+d = {'name': sys.argv[1], 'email': sys.argv[2], 'saved_at': $(date +%s)}
+with open(sys.argv[3], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" "$name" "$email" "$VAULT_QODER/${name}.meta.json"
+
+    echo -e "  ${G}✓ Qoder profile '$name' disimpan!${N}"
+    press_enter
+}
+
+# === SWITCH OPENAI ACCOUNT ===
+switch_openai() {
+    header
+    echo -e "  ${B}🔄 Switch Akun OpenAI (OMP + Pi)${N}"
+    echo ""
+
+    local profiles=()
+    for f in "$VAULT_OPENAI"/*.json; do
+        [[ -f "$f" ]] || continue
+        local n; n=$(basename "$f" .json)
+        local e; e=$(jq -r '.email // "?"' "$f" 2>/dev/null)
+        local p; p=$(jq -r '.plan // "?"' "$f" 2>/dev/null)
+        profiles+=("$n  |  $e  |  $p")
+    done
+
+    if [[ ${#profiles[@]} -eq 0 ]]; then
+        echo -e "  ${Y}Belum ada profile OpenAI tersimpan.${N}"
+        echo -e "  ${D}Tambah dulu: menu 'Simpan Akun OpenAI'${N}"
+        press_enter; return
+    fi
+
+    local chosen
+    chosen=$(printf '%s\n' "${profiles[@]}" | fzf --prompt="  Pilih akun > " --height=15 --reverse 2>/dev/null) || return
+    local profile_name="${chosen%% *}"
+    local profile_file="$VAULT_OPENAI/${profile_name}.json"
+
+    local access refresh expires account_id email
+    access=$(jq -r '.access' "$profile_file")
+    refresh=$(jq -r '.refresh' "$profile_file")
+    expires=$(jq -r '.expires' "$profile_file")
+    account_id=$(jq -r '.accountId // ""' "$profile_file")
+    email=$(jq -r '.email' "$profile_file")
+
+    echo ""
+    echo -e "  ${G}Akun:${N} $email ($(jq -r '.plan' "$profile_file"))"
+    echo ""
+    echo -e "  ${Y}Apply ke:${N}"
+
+    local targets=("omp + pi" "omp saja" "pi saja")
+    local target
+    target=$(printf '%s\n' "${targets[@]}" | fzf --prompt="  Target > " --height=8 --reverse 2>/dev/null) || return
+
+    local now; now=$(date +%s)
+    local done_targets=()
+
+    case "$target" in
+        *"omp + pi"*|"omp"*)
+            # Write to OMP
+            if [[ -f "$OMP_DB" ]]; then
+                OMP_DB="$OMP_DB" _A="$access" _R="$refresh" _E="$expires" _AI="$account_id" _EM="$email" _IK="email:$email" _N="$now" \
+                python3 -c "
+import json, sqlite3, os
+db=os.environ['OMP_DB']
+data=json.dumps({'access':os.environ['_A'],'refresh':os.environ['_R'],'expires':int(os.environ['_E']),'accountId':os.environ['_AI'],'email':os.environ['_EM']})
+ik=os.environ['_IK']; now=int(os.environ['_N'])
+c=sqlite3.connect(db); cur=c.cursor()
+cur.execute('UPDATE auth_credentials SET disabled_cause=\"replaced by auth-vault\", updated_at=? WHERE provider=\"openai-codex\" AND disabled_cause IS NULL',(now,))
+cur.execute('INSERT INTO auth_credentials (provider,credential_type,data,identity_key,created_at,updated_at) VALUES (\"openai-codex\",\"oauth\",?,?,?)',(data,ik,now,now))
+c.commit(); c.close()
+" 2>/dev/null && done_targets+=("omp")
+            fi
+            # Write to Pi
+            if [[ -d "$(dirname "$PI_AUTH")" ]]; then
+                _A="$access" _R="$refresh" _E="$expires" _AI="$account_id" _PA="$PI_AUTH" \
+                python3 -c "
+import json, os
+p=os.environ['_PA']
+ex={}
+try:
+    with open(p) as f: ex=json.load(f)
+except: pass
+ex['openai-codex']={'type':'oauth','access':os.environ['_A'],'refresh':os.environ['_R'],'expires':int(os.environ['_E']),'accountId':os.environ['_AI']}
+with open(p,'w') as f: json.dump(ex,f,indent=2); f.write('\n')
+" 2>/dev/null && done_targets+=("pi")
+            fi
+            ;;
+        *"pi"*)
+            if [[ -d "$(dirname "$PI_AUTH")" ]]; then
+                _A="$access" _R="$refresh" _E="$expires" _AI="$account_id" _PA="$PI_AUTH" \
+                python3 -c "
+import json, os
+p=os.environ['_PA']
+ex={}
+try:
+    with open(p) as f: ex=json.load(f)
+except: pass
+ex['openai-codex']={'type':'oauth','access':os.environ['_A'],'refresh':os.environ['_R'],'expires':int(os.environ['_E']),'accountId':os.environ['_AI']}
+with open(p,'w') as f: json.dump(ex,f,indent=2); f.write('\n')
+" 2>/dev/null && done_targets+=("pi")
+            fi
+            ;;
+    esac
+
+    echo ""
+    if [[ ${#done_targets[@]} -gt 0 ]]; then
+        local joined; joined=$(IFS=' + '; echo "${done_targets[*]}")
+        echo -e "  ${G}✓ Applied ke: $joined${N}"
+        echo -e "  ${D}Restart app untuk pakai akun baru.${N}"
+    else
+        echo -e "  ${R}Gagal apply.${N}"
+    fi
+    press_enter
+}
+
+# === SWITCH QODER ACCOUNT ===
+switch_qoder() {
+    header
+    echo -e "  ${B}🔑 Switch Qoder CLI${N}"
+    echo ""
+
+    local profiles=()
+    for f in "$VAULT_QODER"/*; do
+        [[ -f "$f" ]] || continue
+        local bn; bn=$(basename "$f")
+        [[ "$bn" == ".current" || "$bn" == *.meta.json ]] && continue
+        profiles+=("$bn")
+    done
+
+    if [[ ${#profiles[@]} -eq 0 ]]; then
+        echo -e "  ${Y}Belum ada profile Qoder tersimpan.${N}"
+        echo -e "  ${D}Tambah: login dulu (qodercli login), lalu 'Simpan Akun Qoder'${N}"
+        press_enter; return
+    fi
+
+    local current; current=$(cat "$VAULT_QODER/.current" 2>/dev/null || echo "")
+
+    local display=()
+    for p in "${profiles[@]}"; do
+        local email="?"
+        if [[ -f "$VAULT_QODER/${p}.meta.json" ]]; then
+            email=$(jq -r '.email // "?"' "$VAULT_QODER/${p}.meta.json" 2>/dev/null)
+        fi
+        local marker=""
+        [[ "$p" == "$current" ]] && marker="  ← aktif"
+        display+=("$p  |  $email$marker")
+    done
+
+    local chosen
+    chosen=$(printf '%s\n' "${display[@]}" | fzf --prompt="  Pilih profile > " --height=15 --reverse 2>/dev/null) || return
+    local profile_name="${chosen%% *}"
+
+    # Backup current
+    [[ -f "$QODER_AUTH" ]] && cp "$QODER_AUTH" "$QODER_AUTH.bak"
+
+    cp "$VAULT_QODER/$profile_name" "$QODER_AUTH"
+    echo "$profile_name" > "$VAULT_QODER/.current"
+
+    echo ""
+    echo -e "  ${G}✓ Qoder CLI diganti ke '$profile_name'!${N}"
+    echo -e "  ${D}Restart qodercli untuk pakai akun baru.${N}"
+    press_enter
+}
+
+# === DELETE ACCOUNT ===
+delete_account() {
+    header
+    echo -e "  ${B}🗑️  Hapus Akun${N}"
+    echo ""
+
+    local all=()
+    for f in "$VAULT_OPENAI"/*.json; do
+        [[ -f "$f" ]] || continue
+        local n; n=$(basename "$f" .json)
+        local e; e=$(jq -r '.email // "?"' "$f" 2>/dev/null)
+        all+=("[OpenAI] $n  |  $e")
+    done
+    for f in "$VAULT_QODER"/*; do
+        [[ -f "$f" ]] || continue
+        local bn; bn=$(basename "$f")
+        [[ "$bn" == ".current" || "$bn" == *.meta.json ]] && continue
+        local email="?"
+        [[ -f "$VAULT_QODER/${bn}.meta.json" ]] && email=$(jq -r '.email // "?"' "$VAULT_QODER/${bn}.meta.json" 2>/dev/null)
+        all+=("[Qoder]  $bn  |  $email")
+    done
+
+    if [[ ${#all[@]} -eq 0 ]]; then
+        echo -e "  ${D}Tidak ada akun tersimpan.${N}"
+        press_enter; return
+    fi
+
+    local chosen
+    chosen=$(printf '%s\n' "${all[@]}" | fzf --prompt="  Hapus > " --height=15 --reverse 2>/dev/null) || return
+
+    echo ""
+    echo -e "  ${R}Hapus: $chosen${N}"
+    echo -e "  ${Y}Yakin? [y/N]${N}"
+    read -r confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        if [[ "$chosen" == "[OpenAI]"* ]]; then
+            local name="${chosen#*] }"; name="${name%% *}"
+            rm -f "$VAULT_OPENAI/${name}.json"
+            echo -e "  ${G}✓ Profile OpenAI '$name' dihapus.${N}"
+        else
+            local name="${chosen#*] }"; name="${name%% *}"
+            rm -f "$VAULT_QODER/$name" "$VAULT_QODER/${name}.meta.json"
+            [[ "$(cat "$VAULT_QODER/.current" 2>/dev/null)" == "$name" ]] && rm -f "$VAULT_QODER/.current"
+            echo -e "  ${G}✓ Profile Qoder '$name' dihapus.${N}"
+        fi
+    else
+        echo -e "  ${D}Dibatalkan.${N}"
+    fi
+    press_enter
+}
+
+# === MAIN MENU ===
+main() {
+    while true; do
+        dashboard
+
+        local choice
+        choice=$(printf '%s\n' \
+            "🔄  Switch OpenAI (OMP + Pi)" \
+            "🔑  Switch Qoder CLI" \
+            "➕  Simpan Akun OpenAI" \
+            "➕  Simpan Akun Qoder CLI" \
+            "🗑️  Hapus Akun" \
+            "❌  Keluar" \
+            | fzf --prompt="  Pilih > " --height=12 --reverse --header="  ↑↓ navigate, Enter select" 2>/dev/null) || exit 0
+
+        case "$choice" in
+            *"Switch OpenAI"*) switch_openai ;;
+            *"Switch Qoder"*) switch_qoder ;;
+            *"Simpan Akun OpenAI"*) save_openai ;;
+            *"Simpan Akun Qoder"*) save_qoder ;;
+            *"Hapus"*) delete_account ;;
+            *"Keluar"*) echo -e "${D}Bye!${N}"; exit 0 ;;
+            *) exit 0 ;;
+        esac
+    done
+}
+
+main "$@"

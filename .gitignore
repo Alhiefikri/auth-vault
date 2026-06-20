@@ -1,0 +1,13 @@
+# Auth Vault data (contains tokens and credentials)
+.auth-vault/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
