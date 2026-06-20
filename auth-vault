@@ -19,6 +19,7 @@ B='\033[1m'; D='\033[2m'; N='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/jwt-helpers.sh"
+source "$SCRIPT_DIR/lib/find-autologin.sh"
 vault_ensure_dir
 vault_migrate
 
@@ -476,35 +477,12 @@ autologin_qoder() {
     echo ""
 
     local AUTOLOGIN_SCRIPT=""
-    # Find the autologin script (prefer Python script, fall back to shim)
-    for candidate in \
-        "$(dirname "$0")/qoder-autologin.py" \
-        "$(dirname "$0")/qoder-autologin" \
-        "$HOME/Github/auth-vault/qoder-autologin.py" \
-        "$HOME/Github/auth-vault/qoder-autologin" \
-        "$HOME/.local/bin/qoder-autologin.py" \
-        "$HOME/.local/bin/qoder-autologin"; do
-        if [[ -f "$candidate" && -x "$candidate" ]] || [[ "$candidate" == *.py && -f "$candidate" ]]; then
-            AUTOLOGIN_SCRIPT="$candidate"
-            break
-        fi
-    done
-
-    if [[ -z "$AUTOLOGIN_SCRIPT" ]]; then
+    if ! AUTOLOGIN_SCRIPT=$(find_autologin "$SCRIPT_DIR" 2>/dev/null); then
         echo -e "  ${R}qoder-autologin tidak ditemukan.${N}"
-        echo -e "  ${D}Install: clone auth-vault repo dan chmod +x qoder-autologin${N}"
+        echo -e "  ${D}Install: symlink ke ~/.local/bin/ atau jalankan dari repo directory${N}"
         press_enter
         return
     fi
-
-    # Helper: invoke the autologin script (python3 for .py, direct for bash shim)
-    _run_autologin() {
-        if [[ "$AUTOLOGIN_SCRIPT" == *.py ]]; then
-            python3 "$AUTOLOGIN_SCRIPT" "$@"
-        else
-            "$AUTOLOGIN_SCRIPT" "$@"
-        fi
-    }
 
     # Check dependencies
     if ! command -v python3 &>/dev/null; then
@@ -520,7 +498,7 @@ autologin_qoder() {
         echo -e "  ${Y}Install sekarang? [y/N]${N}"
         read -r install_ans
         if [[ "${install_ans,,}" == "y" ]]; then
-            _run_autologin setup
+            run_autologin "$AUTOLOGIN_SCRIPT" setup
             press_enter
             return
         else
@@ -555,7 +533,7 @@ autologin_qoder() {
             read -r profile
             profile="${profile:-$default_profile}"
             echo ""
-            _run_autologin login "$account" "$profile"
+            run_autologin "$AUTOLOGIN_SCRIPT" login "$account" "$profile"
             press_enter
             ;;
         2)
@@ -574,11 +552,11 @@ autologin_qoder() {
                 return
             fi
             echo ""
-            _run_autologin batch "$filepath"
+            run_autologin "$AUTOLOGIN_SCRIPT" batch "$filepath"
             press_enter
             ;;
         3)
-            _run_autologin interactive
+            run_autologin "$AUTOLOGIN_SCRIPT" interactive
             press_enter
             ;;
         *)

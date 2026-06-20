@@ -9,7 +9,9 @@ QODER_AUTH="$HOME/.qoder/.auth/user"
 OLD_PROFILES_DIR="$HOME/.qoder/.auth/profiles"
 COCKPIT_QODER_ACCOUNTS="$HOME/.antigravity_cockpit/qoder_accounts"
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/vault-profiles.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/vault-profiles.sh"
+source "$SCRIPT_DIR/lib/find-autologin.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -177,31 +179,6 @@ cmd_batch_save() {
     echo "  qoder-auth-swap use nama-akun-x"
 }
 
-_find_autologin() {
-    for candidate in \
-        "$(dirname "$0")/qoder-autologin.py" \
-        "$(dirname "$0")/qoder-autologin" \
-        "$HOME/Github/auth-vault/qoder-autologin.py" \
-        "$HOME/Github/auth-vault/qoder-autologin" \
-        "$HOME/.local/bin/qoder-autologin.py" \
-        "$HOME/.local/bin/qoder-autologin"; do
-        if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-_run_autologin() {
-    local script="$1"; shift
-    if [[ "$script" == *.py ]]; then
-        python3 "$script" "$@"
-    else
-        "$script" "$@"
-    fi
-}
-
 cmd_login() {
     local account="${1:-}"
     local profile="${2:-}"
@@ -214,15 +191,15 @@ cmd_login() {
     fi
 
     local autologin
-    if ! autologin=$(_find_autologin); then
+    if ! autologin=$(find_autologin "$SCRIPT_DIR" 2>/dev/null); then
         err "qoder-autologin tidak ditemukan."
-        echo "  Install: clone auth-vault repo dan chmod +x qoder-autologin"
+        echo "  Install: symlink ke ~/.local/bin/ atau jalankan dari repo directory"
         exit 1
     fi
 
     local args=("login" "$account")
     [[ -n "$profile" ]] && args+=("$profile")
-    _run_autologin "$autologin" "${args[@]}"
+    run_autologin "$autologin" "${args[@]}"
 }
 
 cmd_batch_login() {
@@ -236,12 +213,12 @@ cmd_batch_login() {
     fi
 
     local autologin
-    if ! autologin=$(_find_autologin); then
+    if ! autologin=$(find_autologin "$SCRIPT_DIR" 2>/dev/null); then
         err "qoder-autologin tidak ditemukan."
         exit 1
     fi
 
-    _run_autologin "$autologin" batch "$file"
+    run_autologin "$autologin" batch "$file"
 }
 
 main() {
