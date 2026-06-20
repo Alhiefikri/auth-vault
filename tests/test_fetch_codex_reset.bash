@@ -9,7 +9,8 @@ source "$SCRIPT_DIR/test_helpers.sh"
 source "$PROJECT_DIR/lib/jwt-helpers.sh"
 source "$PROJECT_DIR/lib/ui-helpers.sh"
 
-# fetch_codex_reset is defined in auth-vault; extract it
+# fetch_codex_reset is defined in auth-vault; extract it (and its dependency fetch_codex_quota)
+eval "$(sed -n '/^fetch_codex_quota()/,/^}/p' "$PROJECT_DIR/auth-vault")"
 eval "$(sed -n '/^fetch_codex_reset()/,/^}/p' "$PROJECT_DIR/auth-vault")"
 
 SAVED_PATH="$PATH"

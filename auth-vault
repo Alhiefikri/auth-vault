@@ -112,18 +112,100 @@ get_codex_usage() {
     done
     echo "?|?"
 }
-fetch_codex_reset() {
+fetch_codex_quota() {
     local token="$1" account_id="${2:-}"
-    [[ -z "$token" ]] && { echo "?|?"; return; }
+    [[ -z "$token" ]] && { echo "?|?|?|?"; return; }
     local -a curl_args=(-sS --max-time 5 -H "Authorization: Bearer $token")
     [[ -n "$account_id" ]] && curl_args+=(-H "chatgpt-account-id: $account_id")
     local response
-    response=$(curl "${curl_args[@]}" "https://chatgpt.com/backend-api/wham/usage" 2>/dev/null) || { echo "?|?"; return; }
-    local h_reset w_reset
+    response=$(curl "${curl_args[@]}" "https://chatgpt.com/backend-api/wham/usage" 2>/dev/null) || { echo "?|?|?|?"; return; }
+    local h_used w_used h_reset w_reset
+    h_used=$(echo "$response" | jq -r '.rate_limit.primary_window.used_percent // "?"' 2>/dev/null)
+    w_used=$(echo "$response" | jq -r '.rate_limit.secondary_window.used_percent // "?"' 2>/dev/null)
     h_reset=$(echo "$response" | jq -r '.rate_limit.primary_window.reset_at // "?"' 2>/dev/null)
     w_reset=$(echo "$response" | jq -r '.rate_limit.secondary_window.reset_at // "?"' 2>/dev/null)
-    [[ "$h_reset" == "?" && "$w_reset" == "?" ]] && { echo "?|?"; return; }
-    echo "${h_reset:-?}|${w_reset:-?}"
+    [[ "$h_used" == "?" && "$w_used" == "?" && "$h_reset" == "?" && "$w_reset" == "?" ]] && { echo "?|?|?|?"; return; }
+    echo "${h_used:-?}|${w_used:-?}|${h_reset:-?}|${w_reset:-?}"
+}
+fetch_codex_quota_cached() {
+    local token="$1" account_id="${2:-}"
+    local cache_dir="${AUTH_VAULT_CACHE_DIR:-$HOME/.cache/auth-vault}"
+    local ttl="${AUTH_VAULT_QUOTA_TTL:-60}"
+    local key; key=$(printf '%s' "${token}|${account_id}" | md5sum | cut -d' ' -f1)
+    local cache_file="$cache_dir/quota_${key}.json"
+    mkdir -p "$cache_dir" 2>/dev/null || true
+
+    # Try cache first: must exist, be fresh, and contain valid 4-field data
+    if [[ -f "$cache_file" ]]; then
+        local mtime now age
+        mtime=$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        age=$(( now - mtime ))
+        if (( age < ttl )); then
+            local cached; cached=$(cat "$cache_file" 2>/dev/null)
+            # Validate shape: 4 pipe-separated non-empty fields
+            if [[ "$cached" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+$ ]]; then
+                echo "$cached"
+                return
+            fi
+            # Corrupt → fall through to fetch
+            rm -f "$cache_file" 2>/dev/null || true
+        fi
+    fi
+
+    # Cache miss / stale: fetch from API
+    local fresh; fresh=$(fetch_codex_quota "$token" "$account_id")
+    if [[ "$fresh" != "?|?|?|?" ]]; then
+        printf '%s' "$fresh" > "$cache_file" 2>/dev/null || true
+        echo "$fresh"
+        return
+    fi
+
+    # API failed: graceful degradation — return stale cache if available
+    if [[ -f "$cache_file" ]]; then
+        local cached; cached=$(cat "$cache_file" 2>/dev/null)
+        if [[ "$cached" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+$ ]]; then
+            echo "$cached"
+            return
+        fi
+    fi
+
+    echo "?|?|?|?"
+}
+fetch_codex_quota_parallel() {
+    local outfile="$1"; shift
+    : > "$outfile"
+    if [[ $# -eq 0 ]]; then return 0; fi
+    if (( $# % 2 != 0 )); then return 1; fi
+    local n=$(( $# / 2 ))
+    local workdir; workdir=$(mktemp -d)
+    local i=0
+    while (( i < n )); do
+        local tok="$1" acct="$2"; shift 2
+        (
+            local r; r=$(fetch_codex_quota_cached "$tok" "$acct")
+            printf '%s\n' "$r" > "$workdir/$i"
+        ) &
+        (( ++i ))
+    done
+    wait
+    for (( i = 0; i < n; i++ )); do
+        if [[ -f "$workdir/$i" ]]; then
+            cat "$workdir/$i"
+        else
+            echo "?|?|?|?"
+        fi
+    done > "$outfile"
+    rm -rf "$workdir"
+    return 0
+}
+fetch_codex_reset() {
+    local token="$1" account_id="${2:-}"
+    local full; full=$(fetch_codex_quota "$token" "$account_id")
+    if [[ "$full" == "?|?|?|?" ]]; then echo "?|?"; return; fi
+    # Strip first two fields (h_used|w_used) → keep h_reset|w_reset
+    local rest="${full#*|}"; rest="${rest#*|}"
+    echo "$rest"
 }
 get_codex_reset() {
     local email="$1"; [[ "$email" == "?" ]] && { echo "?|?"; return; }
@@ -206,12 +288,25 @@ dashboard() {
                 [[ $days -ge 2 && $days -le 3 ]] && exp_color="$Y"
                 [[ $days -ge 4 ]] && exp_color="$G"
             fi
-            local ud; ud=$(get_codex_usage "$email")
-            local h="${ud%%|*}" w="${ud##*|}" bar=""
-            [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 4)"
             local acct_id; acct_id=$(jq -r '.account_id // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
-            local live_rd; live_rd=$(fetch_codex_reset "$token" "$acct_id")
-            local h_reset_ts="${live_rd%%|*}"
+            # Single live fetch: quota used% + reset timestamps from OpenAI (cached 60s)
+            local live_q; live_q=$(fetch_codex_quota_cached "$token" "$acct_id")
+            local bar="" h_reset_ts=""
+            if [[ "$live_q" != "?|?|?|?" && "$live_q" != "?|?" ]]; then
+                IFS='|' read -r hu wu hr wr <<< "$live_q"
+                local h_rem="" w_rem=""
+                if [[ "$hu" =~ ^[0-9]+$ ]]; then h_rem=$(( 100 - hu )); fi
+                if [[ "$wu" =~ ^[0-9]+$ ]]; then w_rem=$(( 100 - wu )); fi
+                [[ -n "$h_rem" ]] && bar="h:$(remaining_bar "$h_rem" 4)"
+                h_reset_ts="$hr"
+            else
+                # Fallback to Cockpit cache
+                local ud; ud=$(get_codex_usage "$email")
+                local h="${ud%%|*}"
+                [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 4)"
+                local cr; cr=$(get_codex_reset "$email")
+                h_reset_ts="${cr%%|*}"
+            fi
             local reset_cd; reset_cd=$(reset_countdown "$h_reset_ts")
             local reset_color="$D"
             if [[ "$reset_cd" == "reset" ]]; then reset_color="$R"
@@ -287,17 +382,38 @@ detail_openai() {
         press_enter || return $?; return
     fi
 
-    # Live-fetch reset timestamps from OpenAI API (fallback to Cockpit cache)
-    echo -e "  ${D}⟳ Refreshing rate limits from OpenAI...${N}"
-    local live_h_resets=() live_w_resets=()
+    # Live-fetch quota + reset from OpenAI in parallel (cached 60s; stale-fallback)
+    echo -e "  ${D}⟳ Refreshing quota & rate limits from OpenAI (parallel)...${N}"
+    local parallel_args=()
     for i in "${!ids[@]}"; do
-        local rd
-        rd=$(fetch_codex_reset "${tokens[$i]}" "${acct_ids[$i]}")
-        if [[ "$rd" == "?|?" ]]; then
-            rd=$(get_codex_reset "${emails[$i]}")
+        parallel_args+=("${tokens[$i]}" "${acct_ids[$i]}")
+    done
+    local parallel_outfile; parallel_outfile=$(mktemp)
+    local _t0; _t0=$(date +%s%N)
+    fetch_codex_quota_parallel "$parallel_outfile" "${parallel_args[@]}"
+    local _t1; _t1=$(date +%s%N)
+    local _elapsed_ms=$(( (_t1 - _t0) / 1000000 ))
+    echo -e "  ${D}  ⏱ ${#ids[@]} akun: ${_elapsed_ms}ms${N}" >&2
+    mapfile -t parallel_lines < "$parallel_outfile"
+    rm -f "$parallel_outfile"
+
+    local live_h_used=() live_w_used=() live_h_resets=() live_w_resets=()
+    for i in "${!ids[@]}"; do
+        local rd="${parallel_lines[$i]:-}"
+        if [[ -z "$rd" || "$rd" == "?|?|?|?" || "$rd" == "?|?" ]]; then
+            # Full fallback to Cockpit cache for both used% and reset
+            local cu; cu=$(get_codex_usage "${emails[$i]}")
+            local cr; cr=$(get_codex_reset "${emails[$i]}")
+            live_h_used+=("${cu%%|*}")
+            local _cu_w="${cu#*|}"; live_w_used+=("${_cu_w%%|*}")
+            live_h_resets+=("${cr%%|*}")
+            live_w_resets+=("${cr##*|}")
+        else
+            # Parse 4-tuple: h_used|w_used|h_reset|w_reset
+            IFS='|' read -r hu wu hr wr <<< "$rd"
+            live_h_used+=("$hu"); live_w_used+=("$wu")
+            live_h_resets+=("$hr"); live_w_resets+=("$wr")
         fi
-        live_h_resets+=("${rd%%|*}")
-        live_w_resets+=("${rd##*|}")
     done
 
     # Dynamic email column width: total = 86 + email_col (added Reset column)
@@ -329,8 +445,11 @@ detail_openai() {
             marker="x"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         fi
 
-        local rd; rd=$(get_codex_usage "${emails[$i]}")
-        local h="${rd%%|*}" w="${rd##*|}" bar=""
+        # Compute remaining % from live OpenAI used_percent (100 - used); fallback to "?"
+        local hu="${live_h_used[$i]}" wu="${live_w_used[$i]}"
+        local h w bar=""
+        if [[ "$hu" =~ ^[0-9]+$ ]]; then h=$(( 100 - hu )); else h="?"; fi
+        if [[ "$wu" =~ ^[0-9]+$ ]]; then w=$(( 100 - wu )); else w="?"; fi
         if [[ "$h" != "?" ]]; then
             bar="h:$(remaining_bar $h 4)  w:$(remaining_bar $w 4)"
         else
