@@ -8,6 +8,8 @@ QODER_AUTH="$HOME/.qoder/.auth/user"
 OLD_PROFILES_DIR="$HOME/.qoder/.auth/profiles"
 OMP_DB="$HOME/.omp/agent/agent.db"
 PI_AUTH="$HOME/.pi/agent/auth.json"
+OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
+CODEX_AUTH="$HOME/.codex/auth.json"
 COCKPIT_CURRENT="$HOME/.antigravity_cockpit/provider_current_accounts.json"
 COCKPIT_CODEX_ACCOUNTS="$HOME/.antigravity_cockpit/codex_accounts"
 COCKPIT_QODER_ACCOUNTS="$HOME/.antigravity_cockpit/qoder_accounts"
@@ -16,10 +18,17 @@ COCKPIT_ACCOUNTS="$HOME/.antigravity_cockpit/accounts.json"
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'
 B='\033[1m'; D='\033[2m'; N='\033[0m'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/jwt-helpers.sh"
 source "$SCRIPT_DIR/lib/find-autologin.sh"
+source "$SCRIPT_DIR/lib/ui-helpers.sh"
 vault_ensure_dir
 vault_migrate
 
@@ -64,21 +73,6 @@ header() {
 
 sep() { echo -e "  ${D}────────────────────────────────────────────────────────${N}"; }
 press_enter() { echo ""; echo -e "  ${D}Press Enter untuk kembali...${N}"; read -r; }
-usage_bar() {
-    local pct="${1:-?}" width="${2:-10}"
-    if ! [[ "$pct" =~ ^[0-9]+$ ]]; then echo "  ?"; return; fi
-    local filled
-    filled=$(( pct * width / 100 ))
-    local empty
-    empty=$(( width - filled ))
-    local color="$G"
-    [[ $pct -ge 60 ]] && color="$Y"
-    [[ $pct -ge 85 ]] && color="$R"
-    local bar=""
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=0; i<empty; i++)); do bar+="░"; done
-    echo -e "${color}${bar}${N} ${pct}%"
-}
 
 # === COCKPIT HELPERS ===
 get_current_codex_id() { [[ -f "$COCKPIT_CURRENT" ]] || { echo ""; return; }; jq -r '.current_accounts.codex // empty' "$COCKPIT_CURRENT" 2>/dev/null || echo ""; }
@@ -142,7 +136,7 @@ dashboard() {
             [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
             local ud; ud=$(get_codex_usage "$email")
             local h="${ud%%|*}" w="${ud##*|}" bar=""
-            [[ "$h" != "?" ]] && bar="h:$(usage_bar $h 6)"
+            [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 6)"
             printf "  %-10s  %-28s  %-6s  %-5s  %b\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
         else
             printf "  %-10s  ${D}%-28s${N}\n" "OpenAI" "(belum ada akun aktif)"
@@ -194,7 +188,6 @@ detail_openai() {
         [[ -f "$f" ]] || continue
         local fid; fid=$(basename "$f" .json)
         local email; email=$(jq -r '.email // "?"' "$f" 2>/dev/null)
-        is_account_active "$email" || continue
         local token; token=$(jq -r '.tokens.access_token // empty' "$f" 2>/dev/null)
         local plan="?" exp="?"
         [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
@@ -209,13 +202,19 @@ detail_openai() {
     sep
     printf "  ${C}%-4s${N}  %-28s  %-8s  %s\n" "" "Email" "Plan" "Token"
     sep
+    echo -e "  ${D}● aktif  ○ cockpit  ${Y}✗${D} tidak di accounts.json${N}"
+    sep
     for i in "${!ids[@]}"; do
         local marker="○" color="$D"
-        if [[ "${ids[$i]}" == "$current_id" ]]; then marker="●"; color="$G"; fi
+        if [[ "${ids[$i]}" == "$current_id" ]]; then
+            marker="●"; color="$G"
+        elif ! is_account_active "${emails[$i]}"; then
+            marker="✗"; color="$Y"
+        fi
 
         local ud; ud=$(get_codex_usage "${emails[$i]}")
         local h="${ud%%|*}" w="${ud##*|}" bar=""
-        [[ "$h" != "?" ]] && bar="h:$(usage_bar $h 8) w:$(usage_bar $w 8)"
+        [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 8) w:$(remaining_bar $w 8)"
 
         printf "  ${color}%-4s${N}  %-28s  %-8s  %-5s  %b\n" "$marker" "${emails[$i]}" "${plans[$i]}" "${exps[$i]}" "$bar"
     done
@@ -242,19 +241,11 @@ detail_openai() {
 
     echo ""
     echo -e "  ${G}Akun:${N} $email ($(jwt_plan "$access"))"
-    echo -e "  ${Y}Apply ke:${N}"
-    local target
-    target=$(printf '%s\n' "omp + pi" "omp saja" "pi saja" | fzf --prompt="  Target > " --height=8 --reverse 2>/dev/null) || return
+    echo -e "  ${Y}Apply ke semua app (omp, pi, opencode, codex)...${N}"
 
     local done_targets=()
-    local apply_omp=false apply_pi=false
-    case "$target" in
-        "omp + pi") apply_omp=true; apply_pi=true ;;
-        "omp saja") apply_omp=true ;;
-        "pi saja")  apply_pi=true ;;
-    esac
 
-    if [[ "$apply_omp" == "true" && -f "$OMP_DB" ]]; then
+    if [[ -f "$OMP_DB" ]]; then
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-omp \
             --db "$OMP_DB" \
             --access "$access" \
@@ -266,7 +257,7 @@ detail_openai() {
             2>/dev/null && done_targets+=("omp")
     fi
 
-    if [[ "$apply_pi" == "true" && -d "$(dirname "$PI_AUTH")" ]]; then
+    if [[ -d "$(dirname "$PI_AUTH")" ]]; then
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-pi \
             --path "$PI_AUTH" \
             --access "$access" \
@@ -274,6 +265,26 @@ detail_openai() {
             --expires "$expires" \
             --account-id "$account_id" \
             2>/dev/null && done_targets+=("pi")
+    fi
+
+    if [[ -f "$OPENCODE_AUTH" ]]; then
+        python3 "$SCRIPT_DIR/lib/vault_backends.py" write-opencode \
+            --path "$OPENCODE_AUTH" \
+            --access "$access" \
+            --refresh "$refresh" \
+            --expires "$expires" \
+            --account-id "$account_id" \
+            2>/dev/null && done_targets+=("opencode")
+    fi
+
+    if [[ -f "$CODEX_AUTH" ]]; then
+        python3 "$SCRIPT_DIR/lib/vault_backends.py" write-codex \
+            --path "$CODEX_AUTH" \
+            --access "$access" \
+            --refresh "$refresh" \
+            --expires "$expires" \
+            --account-id "$account_id" \
+            2>/dev/null && done_targets+=("codex")
     fi
 
     if [[ -f "$COCKPIT_CURRENT" ]]; then
@@ -493,7 +504,7 @@ autologin_qoder() {
 
     if ! python3 -c "import playwright" 2>/dev/null; then
         echo -e "  ${Y}Playwright belum terinstall.${N}"
-        echo -e "  ${D}Install: pip3 install playwright && playwright install chromium${N}"
+        echo -e "  ${D}Install: qoder-autologin setup${N}"
         echo ""
         echo -e "  ${Y}Install sekarang? [y/N]${N}"
         read -r install_ans

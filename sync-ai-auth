@@ -1,6 +1,6 @@
 #!/bin/bash
-# sync-ai-auth - Sync OpenAI OAuth ke OMP dan Pi sekaligus
-# Usage: sync-ai-auth [opencode|codex|cockpit] [--yes] [--status] [--only omp|pi]
+# sync-ai-auth - Sync OpenAI OAuth ke OMP, Pi, OpenCode, dan Codex CLI sekaligus
+# Usage: sync-ai-auth [opencode|codex|cockpit] [--yes] [--status] [--only omp|pi|opencode|codex]
 
 set -euo pipefail
 
@@ -61,6 +61,34 @@ write_to_pi() {
 
     python3 "$SCRIPT_DIR/lib/vault_backends.py" write-pi \
         --path "$PI_AUTH" \
+        --access "$ACCESS_TOKEN" \
+        --refresh "$REFRESH_TOKEN" \
+        --expires "$EXPIRES" \
+        --account-id "$ACCOUNT_ID"
+}
+
+write_to_opencode() {
+    if [[ ! -f "$OPENCODE_AUTH" ]]; then
+        warn "OpenCode auth file tidak ditemukan, skip."
+        return 1
+    fi
+
+    python3 "$SCRIPT_DIR/lib/vault_backends.py" write-opencode \
+        --path "$OPENCODE_AUTH" \
+        --access "$ACCESS_TOKEN" \
+        --refresh "$REFRESH_TOKEN" \
+        --expires "$EXPIRES" \
+        --account-id "$ACCOUNT_ID"
+}
+
+write_to_codex() {
+    if [[ ! -f "$CODEX_AUTH" ]]; then
+        warn "Codex CLI auth file tidak ditemukan, skip."
+        return 1
+    fi
+
+    python3 "$SCRIPT_DIR/lib/vault_backends.py" write-codex \
+        --path "$CODEX_AUTH" \
         --access "$ACCESS_TOKEN" \
         --refresh "$REFRESH_TOKEN" \
         --expires "$EXPIRES" \
@@ -164,7 +192,7 @@ show_status() {
 }
 
 main() {
-    echo -e "${CYAN}=== Sync AI Auth (OMP + Pi) ===${NC}"
+    echo -e "${CYAN}=== Sync AI Auth (OMP + Pi + OpenCode + Codex) ===${NC}"
     echo ""
 
     check_deps
@@ -180,18 +208,18 @@ main() {
             -y|--yes) auto_yes=true ;;
             -s|--status) status_only=true ;;
             --only) ;;
-            omp|pi)
+            omp|pi|opencode|codex)
                 if [[ "${args[-1]:-}" == "--only" ]]; then
                     only_target="$arg"
                 else
                     args+=("$arg")
                 fi
                 ;;
-            opencode|codex|cockpit) mode="$arg" ;;
+            cockpit) mode="$arg" ;;
             -h|--help)
-                echo "Usage: sync-ai-auth [opencode|codex|cockpit] [--yes] [--status] [--only omp|pi]"
+                echo "Usage: sync-ai-auth [opencode|codex|cockpit] [--yes] [--status] [--only omp|pi|opencode|codex]"
                 echo ""
-                echo "Sync OpenAI OAuth ke OMP dan Pi sekaligus dalam satu kali jalan."
+                echo "Sync OpenAI OAuth ke OMP, Pi, OpenCode, dan Codex CLI sekaligus."
                 echo ""
                 echo "Sources:"
                 echo "  opencode  Ambil auth dari OpenCode"
@@ -200,9 +228,9 @@ main() {
                 echo "  auto      Coba opencode > codex > cockpit (default)"
                 echo ""
                 echo "Flags:"
-                echo "  -y, --yes       Skip konfirmasi"
-                echo "  -s, --status    Tampilkan status saja"
-                echo "  --only omp|pi   Sync ke satu target saja"
+                echo "  -y, --yes                Skip konfirmasi"
+                echo "  -s, --status             Tampilkan status saja"
+                echo "  --only omp|pi|opencode|codex   Sync ke satu target saja"
                 exit 0
                 ;;
             *) args+=("$arg") ;;
@@ -247,9 +275,15 @@ main() {
     if [[ -z "$only_target" || "$only_target" == "pi" ]]; then
         if [[ -d "$(dirname "$PI_AUTH")" ]]; then targets+=("Pi"); fi
     fi
+    if [[ -z "$only_target" || "$only_target" == "opencode" ]]; then
+        if [[ -f "$OPENCODE_AUTH" ]]; then targets+=("OpenCode"); fi
+    fi
+    if [[ -z "$only_target" || "$only_target" == "codex" ]]; then
+        if [[ -f "$CODEX_AUTH" ]]; then targets+=("Codex"); fi
+    fi
 
     if [[ ${#targets[@]} -eq 0 ]]; then
-        err "Tidak ada target yang tersedia (OMP DB / Pi directory)."
+        err "Tidak ada target yang tersedia (OMP DB / Pi / OpenCode / Codex CLI)."
         exit 1
     fi
 
@@ -282,6 +316,22 @@ main() {
                     synced+=("pi")
                 else
                     warn "Pi gagal ditimpa"
+                fi
+                ;;
+            OpenCode)
+                if write_to_opencode; then
+                    info "OpenCode berhasil ditimpa -> ${EMAIL}"
+                    synced+=("opencode")
+                else
+                    warn "OpenCode gagal ditimpa"
+                fi
+                ;;
+            Codex)
+                if write_to_codex; then
+                    info "Codex CLI berhasil ditimpa -> ${EMAIL}"
+                    synced+=("codex")
+                else
+                    warn "Codex CLI gagal ditimpa"
                 fi
                 ;;
         esac

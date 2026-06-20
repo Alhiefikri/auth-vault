@@ -61,6 +61,28 @@ def cmd_write_pi(args):
     _write_json(args.path, existing)
 
 
+def cmd_write_opencode(args):
+    existing = _load_json(args.path)
+    existing["openai"] = {
+        "access": args.access,
+        "refresh": args.refresh,
+        "expires": int(args.expires),
+        "accountId": args.account_id,
+        "type": "oauth",
+    }
+    _write_json(args.path, existing)
+
+
+def cmd_write_codex(args):
+    existing = _load_json(args.path)
+    if "tokens" not in existing:
+        existing["tokens"] = {}
+    existing["tokens"]["access_token"] = args.access
+    existing["tokens"]["refresh_token"] = args.refresh
+    existing["tokens"]["account_id"] = args.account_id
+    _write_json(args.path, existing)
+
+
 def cmd_write_meta(args):
     meta = {
         "name": args.name,
@@ -100,6 +122,22 @@ def main():
     p_pi.add_argument("--expires", required=True)
     p_pi.add_argument("--account-id", required=True)
     p_pi.set_defaults(func=cmd_write_pi)
+
+    p_opencode = sub.add_parser("write-opencode")
+    p_opencode.add_argument("--path", required=True)
+    p_opencode.add_argument("--access", required=True)
+    p_opencode.add_argument("--refresh", required=True)
+    p_opencode.add_argument("--expires", required=True)
+    p_opencode.add_argument("--account-id", required=True)
+    p_opencode.set_defaults(func=cmd_write_opencode)
+
+    p_codex = sub.add_parser("write-codex")
+    p_codex.add_argument("--path", required=True)
+    p_codex.add_argument("--access", required=True)
+    p_codex.add_argument("--refresh", required=True)
+    p_codex.add_argument("--expires", required=True)
+    p_codex.add_argument("--account-id", required=True)
+    p_codex.set_defaults(func=cmd_write_codex)
 
     p_meta = sub.add_parser("write-meta")
     p_meta.add_argument("--dir", required=True)
