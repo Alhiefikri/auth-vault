@@ -95,4 +95,57 @@ run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; hline"
 assert_equal "──────────" "$_RUN_OUTPUT"
 test_end
 
+# --- reset_countdown (countdown to rate limit reset) ---
+
+test_start "reset_countdown: returns '?' for empty input"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown ''"
+assert_equal "?" "$_RUN_OUTPUT"
+test_end
+
+test_start "reset_countdown: returns '?' for non-numeric input"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown 'abc'"
+assert_equal "?" "$_RUN_OUTPUT"
+test_end
+
+test_start "reset_countdown: returns '?' for zero"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown '0'"
+assert_equal "?" "$_RUN_OUTPUT"
+test_end
+
+test_start "reset_countdown: returns 'reset' when time has passed"
+PAST_TIME=$(( $(date +%s) - 3600 ))
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown '$PAST_TIME'"
+assert_equal "reset" "$_RUN_OUTPUT"
+test_end
+
+test_start "reset_countdown: returns 'Xh Ym' for hours+minutes remaining"
+FUTURE_2H30M=$(( $(date +%s) + 9000 ))
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown '$FUTURE_2H30M'"
+if [[ "$_RUN_OUTPUT" =~ ^[0-9]+h[[:space:]][0-9]+m$ ]]; then
+    : # pass — format matches "Xh Ym"
+else
+    _fail "expected 'Xh Ym' format, got '$_RUN_OUTPUT'"
+fi
+test_end
+
+test_start "reset_countdown: returns 'Xm' for less than 1 hour remaining"
+FUTURE_45M=$(( $(date +%s) + 2700 ))
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown '$FUTURE_45M'"
+if [[ "$_RUN_OUTPUT" =~ ^[0-9]+m$ ]]; then
+    : # pass — format matches "Xm"
+else
+    _fail "expected 'Xm' format, got '$_RUN_OUTPUT'"
+fi
+test_end
+
+test_start "reset_countdown: returns 'Xd Xh' for more than 24 hours"
+FUTURE_2D=$(( $(date +%s) + 86400 * 2 + 3600 ))
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; reset_countdown '$FUTURE_2D'"
+if [[ "$_RUN_OUTPUT" =~ ^[0-9]+d[[:space:]][0-9]+h$ ]]; then
+    : # pass — format matches "Xd Xh"
+else
+    _fail "expected 'Xd Xh' format, got '$_RUN_OUTPUT'"
+fi
+test_end
+
 test_summary

@@ -18,6 +18,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/find-autologin.sh"
+source "$SCRIPT_DIR/lib/qoder-oauth.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -106,8 +107,8 @@ cmd_list() {
         echo -e "  ${DIM}(belum ada profile)${NC}"
         echo ""
         echo "  Tambah profile:"
-        echo "    1. Login: ${CYAN}qodercli login${NC}"
-        echo "    2. Simpan: ${CYAN}qoder-auth-swap save <nama>${NC}"
+        echo "    1. OAuth: ${CYAN}qoder-auth-swap add-account <nama>${NC}"
+        echo "    2. Atau:  ${CYAN}qodercli login${NC} lalu ${CYAN}qoder-auth-swap save <nama>${NC}"
     fi
 
     echo -e "  ${DIM}${sep}${NC}"
@@ -227,6 +228,54 @@ cmd_batch_login() {
     run_autologin "$autologin" batch "$file"
 }
 
+cmd_add_account() {
+    local profile="${1:-}"
+
+    if ! command -v qodercli &>/dev/null; then
+        err "qodercli tidak ditemukan di PATH."
+        echo "  Install Qoder CLI terlebih dahulu."
+        exit 1
+    fi
+
+    echo -e "${CYAN}=== Add Account Qoder (OAuth) ===${NC}"
+    echo ""
+    echo "Menjalankan qodercli login..."
+    echo "Browser akan terbuka. Selesaikan login di browser."
+    echo ""
+
+    qoder_oauth_login
+    if [[ "$QODER_OAUTH_RC" -ne 0 ]]; then
+        err "Login gagal atau timeout."
+        exit 1
+    fi
+
+    if [[ ! -f "$QODER_AUTH" ]]; then
+        err "Auth file tidak terupdate."
+        exit 1
+    fi
+
+    if [[ -n "${QODER_OAUTH_URL:-}" ]]; then
+        echo -e "${DIM}URL: ${QODER_OAUTH_URL}${NC}"
+    fi
+
+    info "Login berhasil!"
+    echo ""
+
+    if [[ -z "$profile" ]]; then
+        echo -n "Nama profile: "
+        read -r profile
+    fi
+
+    if [[ -z "$profile" ]]; then
+        err "Profile name kosong. Dibatalkan."
+        exit 1
+    fi
+
+    vault_save "$profile" "$(_cockpit_email)"
+    info "Profile '$profile' disimpan ke vault!"
+    echo "  File: $VAULT_DIR/$profile"
+}
+
 main() {
     vault_migrate
 
@@ -241,6 +290,7 @@ main() {
         status|-s|--status) cmd_status ;;
         login)    cmd_login "$@" ;;
         batch-login) cmd_batch_login "$@" ;;
+        add-account) cmd_add_account "$@" ;;
         batch)    cmd_batch_save ;;
         -h|--help|help)
             echo "Usage: qoder-auth-swap <command> [args]"
@@ -253,10 +303,11 @@ main() {
             echo "  status                      Tampilkan status auth saat ini"
             echo "  login <email:pass> [name]   Auto-login via Google SSO + simpan ke vault"
             echo "  batch-login <file>          Batch auto-login dari file"
+            echo "  add-account [name]          Login via OAuth (qodercli login) + simpan ke vault"
             echo ""
             echo "Workflow:"
-            echo "  1. qoder-auth-swap login user@gmail.com:pass akun-a"
-            echo "  2. qoder-auth-swap login user2@gmail.com:pass akun-b"
+            echo "  1. qoder-auth-swap add-account akun-a"
+            echo "  2. qoder-auth-swap add-account akun-b"
             echo "  3. qoder-auth-swap use akun-a  # switch kapan saja"
             ;;
         *)

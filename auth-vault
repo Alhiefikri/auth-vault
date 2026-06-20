@@ -51,6 +51,7 @@ source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/jwt-helpers.sh"
 source "$SCRIPT_DIR/lib/find-autologin.sh"
 source "$SCRIPT_DIR/lib/ui-helpers.sh"
+source "$SCRIPT_DIR/lib/qoder-oauth.sh"
 vault_ensure_dir
 vault_migrate
 
@@ -106,6 +107,45 @@ get_codex_usage() {
         local femail; femail=$(jq -r '.email // ""' "$f" 2>/dev/null)
         if [[ "$femail" == "$email" ]]; then
             echo "$(jq -r '.quota.hourly_percentage // "?"' "$f" 2>/dev/null)|$(jq -r '.quota.weekly_percentage // "?"' "$f" 2>/dev/null)"
+            return
+        fi
+    done
+    echo "?|?"
+}
+fetch_codex_reset() {
+    local token="$1" account_id="${2:-}"
+    [[ -z "$token" ]] && { echo "?|?"; return; }
+    local -a curl_args=(-sS --max-time 5 -H "Authorization: Bearer $token")
+    [[ -n "$account_id" ]] && curl_args+=(-H "chatgpt-account-id: $account_id")
+    local response
+    response=$(curl "${curl_args[@]}" "https://chatgpt.com/backend-api/wham/usage" 2>/dev/null) || { echo "?|?"; return; }
+    local h_reset w_reset
+    h_reset=$(echo "$response" | jq -r '.rate_limit.primary_window.reset_at // "?"' 2>/dev/null)
+    w_reset=$(echo "$response" | jq -r '.rate_limit.secondary_window.reset_at // "?"' 2>/dev/null)
+    [[ "$h_reset" == "?" && "$w_reset" == "?" ]] && { echo "?|?"; return; }
+    echo "${h_reset:-?}|${w_reset:-?}"
+}
+get_codex_reset() {
+    local email="$1"; [[ "$email" == "?" ]] && { echo "?|?"; return; }
+    for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
+        [[ -f "$f" ]] || continue
+        local femail; femail=$(jq -r '.email // ""' "$f" 2>/dev/null)
+        if [[ "$femail" == "$email" ]]; then
+            local h_reset w_reset h_window w_window now
+            h_reset=$(jq -r '.quota.hourly_reset_time // "?"' "$f" 2>/dev/null)
+            w_reset=$(jq -r '.quota.weekly_reset_time // "?"' "$f" 2>/dev/null)
+            h_window=$(jq -r '.quota.hourly_window_minutes // 300' "$f" 2>/dev/null)
+            w_window=$(jq -r '.quota.weekly_window_minutes // 10080' "$f" 2>/dev/null)
+            now=$(date +%s)
+            if [[ "$h_reset" =~ ^[0-9]+$ ]]; then
+                local h_win_sec=$(( h_window * 60 ))
+                while (( h_reset <= now )); do h_reset=$(( h_reset + h_win_sec )); done
+            fi
+            if [[ "$w_reset" =~ ^[0-9]+$ ]]; then
+                local w_win_sec=$(( w_window * 60 ))
+                while (( w_reset <= now )); do w_reset=$(( w_reset + w_win_sec )); done
+            fi
+            echo "${h_reset:-?}|${w_reset:-?}"
             return
         fi
     done
@@ -169,6 +209,18 @@ dashboard() {
             local ud; ud=$(get_codex_usage "$email")
             local h="${ud%%|*}" w="${ud##*|}" bar=""
             [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 4)"
+            local acct_id; acct_id=$(jq -r '.account_id // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
+            local live_rd; live_rd=$(fetch_codex_reset "$token" "$acct_id")
+            local h_reset_ts="${live_rd%%|*}"
+            local reset_cd; reset_cd=$(reset_countdown "$h_reset_ts")
+            local reset_color="$D"
+            if [[ "$reset_cd" == "reset" ]]; then reset_color="$R"
+            elif [[ "$reset_cd" =~ ^([0-9]+)h ]]; then
+                (( ${BASH_REMATCH[1]} >= 2 )) && reset_color="$G" || reset_color="$Y"
+            elif [[ "$reset_cd" =~ ^[0-9]+m$ ]]; then reset_color="$R"
+            elif [[ "$reset_cd" =~ ^[0-9]+d ]]; then reset_color="$G"
+            fi
+            bar="${bar}  ${D}R:${N}${reset_color}${reset_cd}${N}"
             printf "  ${D}│${N} ${G}%-8s${N} ${D}│${N} %-28s ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
         else
             printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun aktif)" "" "" ""
@@ -217,15 +269,17 @@ detail_openai() {
     fi
 
     local current_id; current_id=$(get_current_codex_id)
-    local ids=() emails=() plans=() exps=()
+    local ids=() emails=() plans=() exps=() tokens=() acct_ids=()
     for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
         [[ -f "$f" ]] || continue
         local fid; fid=$(basename "$f" .json)
         local email; email=$(jq -r '.email // "?"' "$f" 2>/dev/null)
         local token; token=$(jq -r '.tokens.access_token // empty' "$f" 2>/dev/null)
+        local acct_id; acct_id=$(jq -r '.account_id // empty' "$f" 2>/dev/null)
         local plan="?" exp="?"
         [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
         ids+=("$fid"); emails+=("$email"); plans+=("$plan"); exps+=("$exp")
+        tokens+=("$token"); acct_ids+=("$acct_id")
     done
 
     if [[ ${#ids[@]} -eq 0 ]]; then
@@ -233,25 +287,39 @@ detail_openai() {
         press_enter || return $?; return
     fi
 
-    # Dynamic email column width: total = 71 + email_col
+    # Live-fetch reset timestamps from OpenAI API (fallback to Cockpit cache)
+    echo -e "  ${D}⟳ Refreshing rate limits from OpenAI...${N}"
+    local live_h_resets=() live_w_resets=()
+    for i in "${!ids[@]}"; do
+        local rd
+        rd=$(fetch_codex_reset "${tokens[$i]}" "${acct_ids[$i]}")
+        if [[ "$rd" == "?|?" ]]; then
+            rd=$(get_codex_reset "${emails[$i]}")
+        fi
+        live_h_resets+=("${rd%%|*}")
+        live_w_resets+=("${rd##*|}")
+    done
+
+    # Dynamic email column width: total = 86 + email_col (added Reset column)
     local term_width=${COLUMNS:-100}
     local max_email=20
     for email in "${emails[@]}"; do
         [[ ${#email} -gt $max_email ]] && max_email=${#email}
     done
-    local email_col=$(( term_width - 71 ))
+    local email_col=$(( term_width - 86 ))
     [[ $email_col -lt 20 ]] && email_col=20
     [[ $email_col -gt $max_email ]] && email_col=$max_email
 
     local ec_hl; ec_hl=$(hline "$email_col")
+    local reset_hl; reset_hl=$(hline 14)
     local bars_hl; bars_hl=$(hline 33)
 
     # Table header
     echo ""
-    echo -e "  ${D}┌─────┬─${ec_hl}─┬──────────┬─────────┬─${bars_hl}${N}"
-    printf "  ${D}│${N} ${C}%2s${N}  ${D}│${N} ${C}%-${email_col}s${N} ${D}│${N} ${C}%-8s${N} ${D}│${N} ${C}%-7s${N} ${D}│${N} ${C}%s${N}\n" \
-        "#" "Email" "Plan" "Expire" "Quota Remaining (h / w)"
-    echo -e "  ${D}├─────┼─${ec_hl}─┼──────────┼─────────┼─${bars_hl}${N}"
+    echo -e "  ${D}┌─────┬─${ec_hl}─┬──────────┬─────────┬─${reset_hl}─┬─${bars_hl}${N}"
+    printf "  ${D}│${N} ${C}%2s${N}  ${D}│${N} ${C}%-${email_col}s${N} ${D}│${N} ${C}%-8s${N} ${D}│${N} ${C}%-7s${N} ${D}│${N} ${C}%-14s${N} ${D}│${N} ${C}%s${N}\n" \
+        "#" "Email" "Plan" "Expire" "Reset (h / w)" "Quota Remaining (h / w)"
+    echo -e "  ${D}├─────┼─${ec_hl}─┼──────────┼─────────┼─${reset_hl}─┼─${bars_hl}${N}"
 
     for i in "${!ids[@]}"; do
         local marker="o" mcolor="$D" ncolor="$D" ecolor="$D"
@@ -261,12 +329,30 @@ detail_openai() {
             marker="x"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         fi
 
-        local ud; ud=$(get_codex_usage "${emails[$i]}")
-        local h="${ud%%|*}" w="${ud##*|}" bar=""
+        local rd; rd=$(get_codex_usage "${emails[$i]}")
+        local h="${rd%%|*}" w="${rd##*|}" bar=""
         if [[ "$h" != "?" ]]; then
             bar="h:$(remaining_bar $h 4)  w:$(remaining_bar $w 4)"
         else
             bar="${D}─────────────────────────────────${N}"
+        fi
+
+        local h_reset="${live_h_resets[$i]}" w_reset="${live_w_resets[$i]}"
+        local h_countdown; h_countdown=$(reset_countdown "$h_reset")
+        local w_countdown; w_countdown=$(reset_countdown "$w_reset")
+        local reset_display="${h_countdown} / ${w_countdown}"
+        local reset_color="$D"
+        if [[ "$h_countdown" == "reset" ]]; then
+            reset_color="$R"
+        elif [[ "$h_countdown" =~ ^([0-9]+)h ]]; then
+            local rh="${BASH_REMATCH[1]}"
+            (( rh >= 2 )) && reset_color="$G"
+            (( rh == 1 )) && reset_color="$Y"
+            (( rh == 0 )) && reset_color="$R"
+        elif [[ "$h_countdown" =~ ^([0-9]+)m$ ]]; then
+            reset_color="$R"
+        elif [[ "$h_countdown" =~ ^([0-9]+)d ]]; then
+            reset_color="$G"
         fi
 
         # Truncate email
@@ -284,10 +370,10 @@ detail_openai() {
             [[ $days -ge 4 ]] && exp_color="$G"
         fi
 
-        printf "  ${D}│${N} ${mcolor}%s${N}${ncolor}%1s${N} ${D}│${N} ${ecolor}%-${email_col}s${N} ${D}│${N} %-8s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b\n" \
-            "$marker" "$((i+1))" "$display_email" "${plans[$i]}" "$exp_display" "$bar"
+        printf "  ${D}│${N} ${mcolor}%s${N}${ncolor}%1s${N} ${D}│${N} ${ecolor}%-${email_col}s${N} ${D}│${N} %-8s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} ${reset_color}%-14s${N} ${D}│${N} %b\n" \
+            "$marker" "$((i+1))" "$display_email" "${plans[$i]}" "$exp_display" "$reset_display" "$bar"
     done
-    echo -e "  ${D}└─────┴─${ec_hl}─┴──────────┴─────────┴─${bars_hl}${N}"
+    echo -e "  ${D}└─────┴─${ec_hl}─┴──────────┴─────────┴─${reset_hl}─┴─${bars_hl}${N}"
 
     # Legend
     echo ""
@@ -442,11 +528,11 @@ detail_qoder() {
         done
         sep
         echo ""
-        echo -e "  ${Y}Switch profile [1-${#profiles[@]}], [s] Simpan baru, atau Enter untuk batal:${N}"
+        echo -e "  ${Y}Switch profile [1-${#profiles[@]}], [s] Simpan baru, [a] Add account (OAuth), atau Enter untuk batal:${N}"
     else
         echo -e "  ${D}Belum ada profile Qoder di vault.${N}"
         echo ""
-        echo -e "  ${Y}[s] Simpan profile baru, atau Enter untuk batal:${N}"
+        echo -e "  ${Y}[s] Simpan profile baru, [a] Add account (OAuth), atau Enter untuk batal:${N}"
     fi
 
     echo -n "  > "
@@ -458,6 +544,11 @@ detail_qoder() {
 
     if [[ "$pick" == "s" ]]; then
         save_qoder
+        return
+    fi
+
+    if [[ "$pick" == "a" ]]; then
+        add_account_qoder
         return
     fi
 
@@ -569,6 +660,68 @@ delete_qoder() {
     press_enter || return $?
 }
 
+# === ADD ACCOUNT QODER (OAuth) ===
+add_account_qoder() {
+    header
+    echo -e "  ${B}➕ Add Account Qoder${N} ${D}(OAuth login → Vault)${N}"
+    echo ""
+
+    if ! command -v qodercli &>/dev/null; then
+        echo -e "  ${R}qodercli tidak ditemukan di PATH.${N}"
+        echo -e "  ${D}Install Qoder CLI terlebih dahulu.${N}"
+        press_enter || return $?; return
+    fi
+
+    echo -e "  ${Y}Menjalankan qodercli login...${N}"
+    echo -e "  ${D}Browser akan terbuka. Selesaikan login di browser.${N}"
+    echo ""
+
+    qoder_oauth_login
+    if [[ "$QODER_OAUTH_RC" -ne 0 ]]; then
+        echo ""
+        echo -e "  ${R}Login gagal atau timeout.${N}"
+        press_enter || return $?; return
+    fi
+
+    if [[ ! -f "$QODER_AUTH" ]]; then
+        echo ""
+        echo -e "  ${R}Auth file tidak terupdate.${N}"
+        press_enter || return $?; return
+    fi
+
+    if [[ -n "${QODER_OAUTH_URL:-}" ]]; then
+        echo -e "  ${D}URL: ${QODER_OAUTH_URL}${N}"
+    fi
+
+    echo ""
+    echo -e "  ${G}✓ Login berhasil!${N}"
+    echo ""
+
+    local name
+    echo -e "  ${Y}Nama profile (contoh: akun-utama):${N}"
+    echo -n "  > "
+    local name_rc=0
+    read_input name || name_rc=$?
+    if (( name_rc == 2 )); then return 0; fi
+    if [[ -z "$name" ]]; then
+        echo -e "  ${R}Dibatalkan.${N}"
+        press_enter || return $?; return
+    fi
+
+    local email="(unknown)"
+    if [[ -f "$COCKPIT_CURRENT" ]]; then
+        local qid
+        qid=$(jq -r '.current_accounts.qoder // empty' "$COCKPIT_CURRENT" 2>/dev/null || true)
+        if [[ -n "$qid" && -f "$COCKPIT_QODER_ACCOUNTS/${qid}.json" ]]; then
+            email=$(jq -r '.email // "?"' "$COCKPIT_QODER_ACCOUNTS/${qid}.json" 2>/dev/null || echo "?")
+        fi
+    fi
+
+    vault_save "$name" "$email"
+    echo -e "  ${G}✓ Profile '$name' disimpan ke vault!${N}"
+    press_enter || return $?
+}
+
 # === AUTO-LOGIN QODER ===
 autologin_qoder() {
     header
@@ -674,6 +827,37 @@ autologin_qoder() {
     esac
 }
 
+# === QODER SUBMENU ===
+qoder_menu() {
+    while true; do
+        header
+        echo -e "  ${B}🔑 Qoder CLI${N}"
+        echo ""
+        echo -e "  ${C}1.${N} Switch / Lihat Profile"
+        echo -e "  ${C}2.${N} ➕  Simpan Profile"
+        echo -e "  ${C}3.${N} 🗑️  Hapus Profile"
+        echo -e "  ${C}4.${N} 🔓  Auto-Login (Google SSO)"
+        echo -e "  ${C}5.${N} ➕  Add Account (OAuth)"
+        echo ""
+        echo -e "  ${D}0. Kembali${N}"
+        echo ""
+        echo -n "  Pilih > "
+        rc=0
+        read_input pick || rc=$?
+        if (( rc == 2 )); then continue; fi
+
+        case "$pick" in
+            1) detail_qoder ;;
+            2) save_qoder ;;
+            3) delete_qoder ;;
+            4) autologin_qoder ;;
+            5) add_account_qoder ;;
+            0|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
 # === MAIN MENU ===
 main() {
     while true; do
@@ -681,9 +865,6 @@ main() {
 
         echo -e "  ${C}1.${N} 🔗  OpenAI"
         echo -e "  ${C}2.${N} 🔑  Qoder CLI"
-        echo -e "  ${C}3.${N} ➕  Simpan Qoder CLI"
-        echo -e "  ${C}4.${N} 🗑️  Hapus Profile Qoder"
-        echo -e "  ${C}5.${N} 🔓  Auto-Login Qoder"
         echo -e "  ${C}0.${N} ❌  Keluar"
         echo ""
         echo -n "  Pilih > "
@@ -693,10 +874,7 @@ main() {
 
         case "$choice" in
             1) detail_openai ;;
-            2) detail_qoder ;;
-            3) save_qoder ;;
-            4) delete_qoder ;;
-            5) autologin_qoder ;;
+            2) qoder_menu ;;
             0|"") echo -e "${D}Bye!${N}"; exit 0 ;;
             *) ;;
         esac

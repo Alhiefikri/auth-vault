@@ -59,3 +59,25 @@ padright() {
     local pad=$(( width - dw ))
     printf '%s%*s' "$text" "$pad" ""
 }
+
+reset_countdown() {
+    local reset_ts="${1:-}"
+    [[ -z "$reset_ts" || "$reset_ts" == "0" ]] && { echo "?"; return; }
+    [[ "$reset_ts" =~ ^[0-9]+$ ]] || { echo "?"; return; }
+    local now; now=$(date +%s)
+    local diff=$(( reset_ts - now ))
+    if (( diff <= 0 )); then
+        echo "reset"
+        return
+    fi
+    local days=$(( diff / 86400 ))
+    local hours=$(( (diff % 86400) / 3600 ))
+    local mins=$(( (diff % 3600) / 60 ))
+    if (( days > 0 )); then
+        echo "${days}d ${hours}h"
+    elif (( hours > 0 )); then
+        echo "${hours}h ${mins}m"
+    else
+        echo "${mins}m"
+    fi
+}
