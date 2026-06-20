@@ -78,4 +78,21 @@ _CLEAN=$(echo "$_RUN_OUTPUT" | strip_ansi)
 assert_output_contains "50%"
 test_end
 
+# --- hline (horizontal line generator) ---
+
+test_start "hline: generates correct count of default char"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; hline 5"
+assert_equal "─────" "$_RUN_OUTPUT"
+test_end
+
+test_start "hline: respects custom character"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; hline 3 '-'"
+assert_equal "---" "$_RUN_OUTPUT"
+test_end
+
+test_start "hline: defaults to 10 when no count given"
+run bash -c "source '$PROJECT_DIR/lib/ui-helpers.sh'; hline"
+assert_equal "──────────" "$_RUN_OUTPUT"
+test_end
+
 test_summary
