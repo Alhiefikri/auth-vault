@@ -18,19 +18,9 @@ B='\033[1m'; D='\033[2m'; N='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
+source "$SCRIPT_DIR/lib/jwt-helpers.sh"
 vault_ensure_dir
 vault_migrate
-
-# === JWT HELPERS ===
-jwt_decode() { echo "$1" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true; }
-jwt_email() { local p; p=$(jwt_decode "$1"); echo "$p" | jq -r '."https://api.openai.com/profile".email // "?"' 2>/dev/null; }
-jwt_plan() { local p; p=$(jwt_decode "$1"); echo "$p" | jq -r '."https://api.openai.com/auth".chatgpt_plan_type // "?"' 2>/dev/null; }
-jwt_exp_days() {
-    local p; p=$(jwt_decode "$1")
-    local exp; exp=$(echo "$p" | jq -r '.exp // 0' 2>/dev/null)
-    local now; now=$(date +%s)
-    if [[ "$exp" -gt "$now" ]]; then echo "$(( (exp - now) / 86400 ))d"; else echo "expired"; fi
-}
 
 # === UI HELPERS ===
 header() {
@@ -247,8 +237,7 @@ detail_openai() {
     local refresh; refresh=$(jq -r '.tokens.refresh_token' "$chosen_file")
     local email; email=$(jq -r '.email // "?"' "$chosen_file")
     local account_id; account_id=$(jq -r '.account_id // .tokens.account_id // ""' "$chosen_file")
-    local p; p=$(jwt_decode "$access")
-    local expires=$(( $(echo "$p" | jq -r '.exp // 0' 2>/dev/null) * 1000 ))
+    local expires; expires=$(jwt_exp_ms "$access")
 
     echo ""
     echo -e "  ${G}Akun:${N} $email ($(jwt_plan "$access"))"

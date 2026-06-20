@@ -5,6 +5,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/jwt-helpers.sh"
+source "$SCRIPT_DIR/lib/account-sources.sh"
 
 OMP_DB="$HOME/.omp/agent/agent.db"
 PI_AUTH="$HOME/.pi/agent/auth.json"
@@ -31,80 +33,6 @@ check_deps() {
             exit 1
         fi
     done
-}
-
-decode_jwt_email() {
-    local token="$1"
-    local payload
-    payload=$(echo "$token" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true)
-    echo "$payload" | jq -r '."https://api.openai.com/profile".email // empty' 2>/dev/null
-}
-
-decode_jwt_exp_ms() {
-    local token="$1"
-    local payload
-    payload=$(echo "$token" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true)
-    local exp
-    exp=$(echo "$payload" | jq -r '.exp // empty' 2>/dev/null)
-    if [[ -n "$exp" ]]; then
-        echo $(( exp * 1000 ))
-    else
-        echo "0"
-    fi
-}
-
-read_from_opencode() {
-    if [[ ! -f "$OPENCODE_AUTH" ]]; then return 1; fi
-    local openai_entry
-    openai_entry=$(jq -r '.openai // empty' "$OPENCODE_AUTH" 2>/dev/null)
-    if [[ -z "$openai_entry" || "$openai_entry" == "null" ]]; then return 1; fi
-
-    ACCESS_TOKEN=$(jq -r '.openai.access' "$OPENCODE_AUTH")
-    REFRESH_TOKEN=$(jq -r '.openai.refresh' "$OPENCODE_AUTH")
-    EXPIRES=$(jq -r '.openai.expires' "$OPENCODE_AUTH")
-    ACCOUNT_ID=$(jq -r '.openai.accountId // empty' "$OPENCODE_AUTH")
-    EMAIL=$(decode_jwt_email "$ACCESS_TOKEN")
-    SOURCE="OpenCode"
-    return 0
-}
-
-read_from_codex() {
-    if [[ ! -f "$CODEX_AUTH" ]]; then return 1; fi
-    local has_tokens
-    has_tokens=$(jq -r '.tokens.access_token // empty' "$CODEX_AUTH" 2>/dev/null)
-    if [[ -z "$has_tokens" ]]; then return 1; fi
-
-    ACCESS_TOKEN=$(jq -r '.tokens.access_token' "$CODEX_AUTH")
-    REFRESH_TOKEN=$(jq -r '.tokens.refresh_token' "$CODEX_AUTH")
-    EXPIRES=$(decode_jwt_exp_ms "$ACCESS_TOKEN")
-    ACCOUNT_ID=$(jq -r '.tokens.account_id // empty' "$CODEX_AUTH")
-    EMAIL=$(decode_jwt_email "$ACCESS_TOKEN")
-    SOURCE="Codex CLI"
-    return 0
-}
-
-read_from_cockpit() {
-    if [[ ! -f "$COCKPIT_CURRENT" ]]; then return 1; fi
-    local current_codex_id
-    current_codex_id=$(jq -r '.current_accounts.codex // empty' "$COCKPIT_CURRENT" 2>/dev/null)
-    if [[ -z "$current_codex_id" ]]; then return 1; fi
-
-    local account_file="$COCKPIT_CODEX_ACCOUNTS/${current_codex_id}.json"
-    if [[ ! -f "$account_file" ]]; then
-        warn "File akun Codex aktif tidak ditemukan: $account_file"
-        return 1
-    fi
-
-    ACCESS_TOKEN=$(jq -r '.tokens.access_token' "$account_file")
-    REFRESH_TOKEN=$(jq -r '.tokens.refresh_token' "$account_file")
-    EXPIRES=$(decode_jwt_exp_ms "$ACCESS_TOKEN")
-    ACCOUNT_ID=$(jq -r '.account_id // empty' "$account_file")
-    EMAIL=$(jq -r '.email // empty' "$account_file")
-    if [[ -z "$EMAIL" ]]; then
-        EMAIL=$(decode_jwt_email "$ACCESS_TOKEN")
-    fi
-    SOURCE="Cockpit Tools"
-    return 0
 }
 
 write_to_omp() {
@@ -139,30 +67,6 @@ write_to_pi() {
         --account-id "$ACCOUNT_ID"
 }
 
-get_token_info() {
-    local token="$1"
-    if [[ -z "$token" ]]; then
-        echo "???|???|???"
-        return
-    fi
-    local payload
-    payload=$(echo "$token" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null || true)
-    local email plan exp
-    email=$(echo "$payload" | jq -r '."https://api.openai.com/profile".email // "?"' 2>/dev/null)
-    plan=$(echo "$payload" | jq -r '."https://api.openai.com/auth".chatgpt_plan_type // "?"' 2>/dev/null)
-    exp=$(echo "$payload" | jq -r '.exp // 0' 2>/dev/null)
-    local now
-    now=$(date +%s)
-    local status
-    if [[ "$exp" -gt "$now" ]]; then
-        local days_left=$(( (exp - now) / 86400 ))
-        status="${days_left} hari lagi"
-    else
-        status="expired"
-    fi
-    echo "${email:-?}|${plan:-?}|${status}"
-}
-
 show_status() {
     echo ""
     local sep="─────────────────────────────────────────────────────────"
@@ -181,7 +85,7 @@ show_status() {
             ORDER BY id DESC LIMIT 1;
         " 2>/dev/null || true)
         if [[ -n "$omp_token" ]]; then
-            omp_info=$(get_token_info "$omp_token")
+            omp_info=$(jwt_info "$omp_token")
         fi
     fi
     local omp_email omp_plan omp_exp
@@ -194,7 +98,7 @@ show_status() {
         local pi_token
         pi_token=$(jq -r '."openai-codex".access // empty' "$PI_AUTH" 2>/dev/null || true)
         if [[ -n "$pi_token" ]]; then
-            pi_info=$(get_token_info "$pi_token")
+            pi_info=$(jwt_info "$pi_token")
         fi
     fi
     local pi_email pi_plan pi_exp
@@ -207,7 +111,7 @@ show_status() {
         local oc_token
         oc_token=$(jq -r '.openai.access // empty' "$OPENCODE_AUTH" 2>/dev/null || true)
         if [[ -n "$oc_token" ]]; then
-            oc_info=$(get_token_info "$oc_token")
+            oc_info=$(jwt_info "$oc_token")
         fi
     fi
     local oc_email oc_plan oc_exp
@@ -220,7 +124,7 @@ show_status() {
         local cx_token
         cx_token=$(jq -r '.tokens.access_token // empty' "$CODEX_AUTH" 2>/dev/null || true)
         if [[ -n "$cx_token" ]]; then
-            cx_info=$(get_token_info "$cx_token")
+            cx_info=$(jwt_info "$cx_token")
         fi
     fi
     local cx_email cx_plan cx_exp
@@ -312,13 +216,13 @@ main() {
 
     local loaded=false
     case "$mode" in
-        opencode) read_from_opencode && loaded=true ;;
-        codex)    read_from_codex && loaded=true ;;
-        cockpit)  read_from_cockpit && loaded=true ;;
+        opencode) read_source_opencode && loaded=true ;;
+        codex)    read_source_codex && loaded=true ;;
+        cockpit)  read_source_cockpit && loaded=true ;;
         auto)
-            read_from_opencode && loaded=true \
-            || { read_from_codex && loaded=true; } \
-            || { read_from_cockpit && loaded=true; }
+            read_source_opencode && loaded=true \
+            || { read_source_codex && loaded=true; } \
+            || { read_source_cockpit && loaded=true; }
             ;;
     esac
 
@@ -328,7 +232,7 @@ main() {
     fi
 
     local plan
-    plan=$(echo "$ACCESS_TOKEN" | cut -d'.' -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '."https://api.openai.com/auth".chatgpt_plan_type // "?"' 2>/dev/null)
+    plan=$(jwt_plan "$ACCESS_TOKEN")
 
     info "Sumber: $SOURCE"
     info "Email:  ${EMAIL:-?}"
