@@ -1,12 +1,15 @@
 #!/bin/bash
 # qoder-auth-swap - Manage Qoder CLI auth profiles
-# Usage: qoder-auth-swap [save|use|list|status] [name]
+# Usage: qoder-auth-swap [save|use|list|delete|status] [name]
 
 set -euo pipefail
 
+VAULT_DIR="$HOME/.auth-vault/qoder"
 QODER_AUTH="$HOME/.qoder/.auth/user"
-QODER_PROFILES_DIR="$HOME/.qoder/.auth/profiles"
+OLD_PROFILES_DIR="$HOME/.qoder/.auth/profiles"
 COCKPIT_QODER_ACCOUNTS="$HOME/.antigravity_cockpit/qoder_accounts"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/vault-profiles.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,21 +22,16 @@ info()  { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 err()   { echo -e "${RED}[ERR]${NC} $*" >&2; }
 
-ensure_profiles_dir() {
-    mkdir -p "$QODER_PROFILES_DIR"
-}
-
-get_current_email() {
-    if [[ ! -f "$QODER_AUTH" ]]; then
-        echo "?"
-        return
+_cockpit_email() {
+    local email="unknown"
+    if [[ -f "$HOME/.antigravity_cockpit/provider_current_accounts.json" ]]; then
+        local qid
+        qid=$(jq -r '.current_accounts.qoder // empty' "$HOME/.antigravity_cockpit/provider_current_accounts.json" 2>/dev/null || true)
+        if [[ -n "$qid" && -f "$COCKPIT_QODER_ACCOUNTS/${qid}.json" ]]; then
+            email=$(jq -r '.email // "unknown"' "$COCKPIT_QODER_ACCOUNTS/${qid}.json" 2>/dev/null || echo "unknown")
+        fi
     fi
-    local link="$QODER_PROFILES_DIR/.current"
-    if [[ -f "$link" ]]; then
-        cat "$link"
-    else
-        echo "(unknown)"
-    fi
+    echo "$email"
 }
 
 cmd_save() {
@@ -51,12 +49,9 @@ cmd_save() {
         exit 1
     fi
 
-    ensure_profiles_dir
-    cp "$QODER_AUTH" "$QODER_PROFILES_DIR/$name"
-    echo "$name" > "$QODER_PROFILES_DIR/.current"
-
+    vault_save "$name" "$(_cockpit_email)"
     info "Profile '$name' berhasil disimpan!"
-    echo "  File: $QODER_PROFILES_DIR/$name"
+    echo "  File: $VAULT_DIR/$name"
 }
 
 cmd_use() {
@@ -68,55 +63,36 @@ cmd_use() {
         exit 1
     fi
 
-    local profile="$QODER_PROFILES_DIR/$name"
-    if [[ ! -f "$profile" ]]; then
+    if ! vault_use "$name"; then
         err "Profile '$name' tidak ditemukan."
         echo "  Lihat daftar: qoder-auth-swap list"
         exit 1
     fi
-
-    # backup current
-    if [[ -f "$QODER_AUTH" ]]; then
-        cp "$QODER_AUTH" "$QODER_AUTH.bak"
-    fi
-
-    cp "$profile" "$QODER_AUTH"
-    echo "$name" > "$QODER_PROFILES_DIR/.current"
 
     info "Auth Qoder CLI diganti ke profile '$name'!"
     echo "  Restart qodercli untuk pakai akun baru."
 }
 
 cmd_list() {
-    ensure_profiles_dir
-
     echo -e "${CYAN}=== Qoder CLI Auth Profiles ===${NC}"
     echo ""
 
-    local current
-    current=$(cat "$QODER_PROFILES_DIR/.current" 2>/dev/null || echo "")
-
+    local current; current=$(vault_get_current)
     local sep="──────────────────────────────────────────────"
     echo -e "  ${DIM}${sep}${NC}"
-    printf "  ${CYAN}%-20s${NC}  %-10s  %s\n" "Profile" "Size" "Status"
+    printf "  ${CYAN}%-20s${NC}  %-24s  %s\n" "Profile" "Email" "Status"
     echo -e "  ${DIM}${sep}${NC}"
 
     local found=false
-    for profile in "$QODER_PROFILES_DIR"/*; do
-        [[ -f "$profile" ]] || continue
-        local pname
-        pname=$(basename "$profile")
-        [[ "$pname" == ".current" ]] && continue
+    local names; names=$(vault_list_names)
+    while IFS= read -r pname; do
+        [[ -z "$pname" ]] && continue
         found=true
-
-        local size
-        size=$(wc -c < "$profile")
+        local email; email=$(vault_get_email "$pname")
         local status=""
-        if [[ "$pname" == "$current" ]]; then
-            status="${GREEN}aktif${NC}"
-        fi
-        printf "  %-20s  %-10s  %b\n" "$pname" "${size} bytes" "$status"
-    done
+        [[ "$pname" == "$current" ]] && status="${GREEN}aktif${NC}"
+        printf "  %-20s  %-24s  %b\n" "$pname" "$email" "$status"
+    done <<< "$names"
 
     if [[ "$found" != "true" ]]; then
         echo -e "  ${DIM}(belum ada profile)${NC}"
@@ -139,46 +115,50 @@ cmd_status() {
     printf "  ${CYAN}%-15s${NC}  %s\n" "Item" "Detail"
     echo -e "  ${DIM}${sep}${NC}"
 
-    # Current profile
-    local current
-    current=$(cat "$QODER_PROFILES_DIR/.current" 2>/dev/null || echo "(none)")
-    printf "  %-15s  %s\n" "Profile aktif" "$current"
+    local current; current=$(vault_get_current)
+    printf "  %-15s  %s\n" "Profile aktif" "${current:-(none)}"
 
-    # Auth file
     if [[ -f "$QODER_AUTH" ]]; then
-        local size
-        size=$(wc -c < "$QODER_AUTH")
-        local modified
-        modified=$(stat -c '%y' "$QODER_AUTH" 2>/dev/null | cut -d'.' -f1 || echo "?")
+        local size; size=$(wc -c < "$QODER_AUTH")
+        local modified; modified=$(stat -c '%y' "$QODER_AUTH" 2>/dev/null | cut -d'.' -f1 || echo "?")
         printf "  %-15s  %s\n" "Auth file" "${size} bytes"
         printf "  %-15s  %s\n" "Modified" "$modified"
     else
         printf "  %-15s  %s\n" "Auth file" "(belum ada)"
     fi
 
-    # Cockpit Tools current Qoder account
     if [[ -f "$HOME/.antigravity_cockpit/provider_current_accounts.json" ]]; then
         local cockpit_id
         cockpit_id=$(jq -r '.current_accounts.qoder // empty' "$HOME/.antigravity_cockpit/provider_current_accounts.json" 2>/dev/null)
         if [[ -n "$cockpit_id" ]]; then
-            local cockpit_email
-            cockpit_email=$(jq -r '.email // "?"' "$COCKPIT_QODER_ACCOUNTS/${cockpit_id}.json" 2>/dev/null || echo "?")
-            local cockpit_plan
-            cockpit_plan=$(jq -r '.plan_type // "?"' "$COCKPIT_QODER_ACCOUNTS/${cockpit_id}.json" 2>/dev/null || echo "?")
+            local cockpit_email; cockpit_email=$(jq -r '.email // "?"' "$COCKPIT_QODER_ACCOUNTS/${cockpit_id}.json" 2>/dev/null || echo "?")
+            local cockpit_plan; cockpit_plan=$(jq -r '.plan_type // "?"' "$COCKPIT_QODER_ACCOUNTS/${cockpit_id}.json" 2>/dev/null || echo "?")
             printf "  %-15s  %s\n" "Cockpit akun" "$cockpit_email ($cockpit_plan)"
         else
             printf "  %-15s  %s\n" "Cockpit akun" "(tidak ada akun Qoder aktif)"
         fi
     fi
 
-    # Total saved profiles
-    ensure_profiles_dir
-    local count
-    count=$(find "$QODER_PROFILES_DIR" -maxdepth 1 -type f ! -name '.current' | wc -l)
-    printf "  %-15s  %s\n" "Saved profiles" "$count"
+    printf "  %-15s  %s\n" "Saved profiles" "$(vault_count)"
 
     echo -e "  ${DIM}${sep}${NC}"
     echo ""
+}
+
+cmd_delete() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        err "Usage: qoder-auth-swap delete <name>"
+        echo "  Hapus profile dari vault."
+        exit 1
+    fi
+
+    if ! vault_delete "$name"; then
+        err "Profile '$name' tidak ditemukan."
+        exit 1
+    fi
+
+    info "Profile '$name' dihapus."
 }
 
 cmd_batch_save() {
@@ -197,7 +177,64 @@ cmd_batch_save() {
     echo "  qoder-auth-swap use nama-akun-x"
 }
 
+_find_autologin() {
+    for candidate in \
+        "$(dirname "$0")/qoder-autologin" \
+        "$HOME/Github/auth-vault/qoder-autologin" \
+        "$HOME/.local/bin/qoder-autologin"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+cmd_login() {
+    local account="${1:-}"
+    local profile="${2:-}"
+
+    if [[ -z "$account" ]]; then
+        err "Usage: qoder-auth-swap login <email:password> [profile_name]"
+        echo "  Auto-login via Google SSO + simpan ke vault."
+        echo "  Contoh: qoder-auth-swap login user@gmail.com:pass123 akun-utama"
+        exit 1
+    fi
+
+    local autologin
+    if ! autologin=$(_find_autologin); then
+        err "qoder-autologin tidak ditemukan."
+        echo "  Install: clone auth-vault repo dan chmod +x qoder-autologin"
+        exit 1
+    fi
+
+    local args=("login" "$account")
+    [[ -n "$profile" ]] && args+=("$profile")
+    "$autologin" "${args[@]}"
+}
+
+cmd_batch_login() {
+    local file="${1:-}"
+
+    if [[ -z "$file" ]]; then
+        err "Usage: qoder-auth-swap batch-login <accounts_file>"
+        echo "  Batch auto-login dari file (format: email:password per baris)."
+        echo "  Contoh: qoder-auth-swap batch-login accounts.txt"
+        exit 1
+    fi
+
+    local autologin
+    if ! autologin=$(_find_autologin); then
+        err "qoder-autologin tidak ditemukan."
+        exit 1
+    fi
+
+    "$autologin" batch "$file"
+}
+
 main() {
+    vault_migrate
+
     local cmd="${1:-status}"
     shift 2>/dev/null || true
 
@@ -205,23 +242,27 @@ main() {
         save)     cmd_save "$@" ;;
         use)      cmd_use "$@" ;;
         list)     cmd_list ;;
+        delete)   cmd_delete "$@" ;;
         status|-s|--status) cmd_status ;;
+        login)    cmd_login "$@" ;;
+        batch-login) cmd_batch_login "$@" ;;
         batch)    cmd_batch_save ;;
         -h|--help|help)
             echo "Usage: qoder-auth-swap <command> [args]"
             echo ""
             echo "Commands:"
-            echo "  save <name>     Simpan auth CLI saat ini sebagai profile"
-            echo "  use <name>      Ganti auth CLI ke profile yang disimpan"
-            echo "  list            Tampilkan semua profile yang disimpan"
-            echo "  status          Tampilkan status auth saat ini"
+            echo "  save <name>                 Simpan auth CLI saat ini sebagai profile"
+            echo "  use <name>                  Ganti auth CLI ke profile yang disimpan"
+            echo "  list                        Tampilkan semua profile yang disimpan"
+            echo "  delete <name>               Hapus profile dari vault"
+            echo "  status                      Tampilkan status auth saat ini"
+            echo "  login <email:pass> [name]   Auto-login via Google SSO + simpan ke vault"
+            echo "  batch-login <file>          Batch auto-login dari file"
             echo ""
             echo "Workflow:"
-            echo "  1. qodercli login           # login ke akun A"
-            echo "  2. qoder-auth-swap save akun-a"
-            echo "  3. qodercli login           # login ke akun B"
-            echo "  4. qoder-auth-swap save akun-b"
-            echo "  5. qoder-auth-swap use akun-a  # switch kapan saja"
+            echo "  1. qoder-auth-swap login user@gmail.com:pass akun-a"
+            echo "  2. qoder-auth-swap login user2@gmail.com:pass akun-b"
+            echo "  3. qoder-auth-swap use akun-a  # switch kapan saja"
             ;;
         *)
             err "Command tidak dikenal: $cmd"
