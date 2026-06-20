@@ -24,8 +24,10 @@ vault_migrate() {
         for f in "$OLD_PROFILES_DIR"/*; do
             [[ -f "$f" ]] || continue
             local bn; bn=$(basename "$f")
-            [[ "$bn" == *.meta.json ]] && continue
-            [[ ! -f "$VAULT_DIR/$bn" ]] && cp "$f" "$VAULT_DIR/$bn"
+            if [[ "$bn" == *.meta.json ]]; then continue; fi
+            if [[ ! -f "$VAULT_DIR/$bn" ]]; then
+                cp "$f" "$VAULT_DIR/$bn"
+            fi
         done
     fi
 }
@@ -71,7 +73,7 @@ vault_list_names() {
     for f in "$VAULT_DIR"/*; do
         [[ -f "$f" ]] || continue
         local bn; bn=$(basename "$f")
-        [[ "$bn" == ".current" || "$bn" == *.meta.json ]] && continue
+        if [[ "$bn" == ".current" || "$bn" == *.meta.json ]]; then continue; fi
         echo "$bn"
     done
 }

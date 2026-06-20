@@ -9,7 +9,13 @@ QODER_AUTH="$HOME/.qoder/.auth/user"
 OLD_PROFILES_DIR="$HOME/.qoder/.auth/profiles"
 COCKPIT_QODER_ACCOUNTS="$HOME/.antigravity_cockpit/qoder_accounts"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/find-autologin.sh"
 

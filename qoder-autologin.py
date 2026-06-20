@@ -96,7 +96,7 @@ def check_dependencies():
     result["playwright"] = {
         "installed": pw_installed,
         "version": pw_version,
-        "install_hint": None if pw_installed else "pip3 install playwright",
+        "install_hint": None if pw_installed else "Run: qoder-autologin setup",
     }
 
     # chromium (Playwright browser)
@@ -602,15 +602,17 @@ def cmd_setup():
     log("=== Qoder Auto-Login Setup ===", "INFO")
     log("Installing dependencies...", "INFO")
 
-    # Install playwright Python package
     log("Installing playwright...", "WAIT")
-    proc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--user", "playwright"],
-        capture_output=True, text=True,
-    )
+    pip_cmd = [sys.executable, "-m", "pip", "install", "--user", "playwright"]
+    proc = subprocess.run(pip_cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        log(f"pip install playwright failed: {proc.stderr[:200]}", "ERR")
-        sys.exit(1)
+        if "externally-managed-environment" in proc.stderr:
+            log("PEP 668 detected, retrying with --break-system-packages...", "WAIT")
+            pip_cmd.append("--break-system-packages")
+            proc = subprocess.run(pip_cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            log(f"pip install playwright failed: {proc.stderr[:200]}", "ERR")
+            sys.exit(1)
 
     # Install chromium browser
     log("Installing Playwright chromium browser...", "WAIT")

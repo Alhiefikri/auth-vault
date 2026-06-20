@@ -202,6 +202,31 @@ class TestSetupCommand:
             with pytest.raises(SystemExit):
                 autologin.cmd_setup()
 
+    def test_setup_retries_pep668(self, autologin):
+        """setup retries with --break-system-packages on PEP 668 error."""
+        with mock.patch("subprocess.run") as mock_run:
+            pep668_err = "error: externally-managed-environment"
+            mock_run.side_effect = [
+                mock.Mock(returncode=1, stderr=pep668_err),
+                mock.Mock(returncode=0),
+                mock.Mock(returncode=0),
+            ]
+            autologin.cmd_setup()
+            calls = [str(c) for c in mock_run.call_args_list]
+            retry_called = any("--break-system-packages" in c for c in calls)
+            assert retry_called, f"--break-system-packages not used. Calls: {calls}"
+
+    def test_setup_pep668_retry_fails(self, autologin):
+        """setup exits when --break-system-packages retry also fails."""
+        with mock.patch("subprocess.run") as mock_run:
+            pep668_err = "error: externally-managed-environment"
+            mock_run.side_effect = [
+                mock.Mock(returncode=1, stderr=pep668_err),
+                mock.Mock(returncode=1, stderr="still broken"),
+            ]
+            with pytest.raises(SystemExit):
+                autologin.cmd_setup()
+
 
 # ── Step 3: status subcommand ───────────────────────────────────────────
 
