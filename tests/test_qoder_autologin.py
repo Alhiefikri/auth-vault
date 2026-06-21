@@ -567,3 +567,237 @@ class TestExistingFunctionality:
         captured = capsys.readouterr()
         assert "a@b.com" in captured.out
         assert "c@d.com" in captured.out
+
+
+# ── Bug fix verification tests ──────────────────────────────────────────
+
+class TestBugNoSaveFlag:
+    """Fix: --no-save flag now prevents save_to_vault() via save parameter."""
+
+    def test_no_save_flag_prevents_vault_save(self, autologin, tmp_path):
+        """When save=False, save_to_vault should NOT be called."""
+        vault_dir = tmp_path / "vault"
+        vault_dir.mkdir()
+        auth_dir = tmp_path / "qoder" / ".auth"
+        auth_dir.mkdir(parents=True)
+        auth_file = auth_dir / "user"
+        auth_file.write_text('{"token":"test"}')
+
+        mock_proc = mock.MagicMock()
+        mock_proc.stdout = iter([
+            "Visit https://qoder.com/device/selectAccounts?code=abc\n",
+        ])
+        mock_proc.wait.return_value = 0
+
+        async def touch_auth_then_sso(*args, **kwargs):
+            import time as _time
+            _time.sleep(0.05)
+            auth_file.write_text('{"token":"updated"}')
+            return {"done": True, "error": None}
+
+        with mock.patch.object(autologin, "VAULT_DIR", vault_dir), \
+             mock.patch.object(autologin, "QODER_AUTH", auth_file), \
+             mock.patch("subprocess.Popen", return_value=mock_proc), \
+             mock.patch.object(autologin, "automate_google_sso",
+                               new_callable=mock.AsyncMock,
+                               side_effect=touch_auth_then_sso), \
+             mock.patch.object(autologin, "save_to_vault") as mock_save:
+            import asyncio
+            result = asyncio.run(autologin.login_account(
+                "test@a.com", "pass", "test-profile", save=False
+            ))
+
+        assert result["success"] is True
+        mock_save.assert_not_called()
+
+
+class TestBugProfileNameCollision:
+    """Fix: _generate_unique_profiles appends suffix for duplicate local parts."""
+
+    def test_different_emails_same_local_part_get_unique_profiles(self, autologin):
+        """Two emails with same local part get different profile names."""
+        accounts = [
+            {"email": "john@gmail.com", "password": "p1"},
+            {"email": "john@yahoo.com", "password": "p2"},
+        ]
+        profiles = autologin._generate_unique_profiles(accounts)
+        assert len(set(profiles)) == 2
+        assert profiles[0] == "john"
+        assert profiles[1] == "john-2"
+
+    def test_three_collisions_get_incrementing_suffix(self, autologin):
+        """Three accounts with same local part get -2, -3 suffixes."""
+        accounts = [
+            {"email": "alice@a.com", "password": "p"},
+            {"email": "alice@b.com", "password": "p"},
+            {"email": "alice@c.com", "password": "p"},
+        ]
+        profiles = autologin._generate_unique_profiles(accounts)
+        assert profiles == ["alice", "alice-2", "alice-3"]
+
+    def test_no_collision_unchanged(self, autologin):
+        """Accounts with different local parts keep original names."""
+        accounts = [
+            {"email": "alice@a.com", "password": "p"},
+            {"email": "bob@b.com", "password": "p"},
+        ]
+        profiles = autologin._generate_unique_profiles(accounts)
+        assert profiles == ["alice", "bob"]
+
+    def test_batch_accounts_get_unique_profiles(self, autologin, tmp_path):
+        """run_batch passes unique profile names to login_account."""
+        accounts = [
+            {"email": "john@gmail.com", "password": "pass1"},
+            {"email": "john@yahoo.com", "password": "pass2"},
+        ]
+
+        saved_profiles = []
+
+        async def mock_login(email, password, profile_name=None, save=True,
+                             auth_file_override=None):
+            saved_profiles.append(profile_name)
+            return {"email": email, "success": True, "profile": profile_name,
+                    "error": None, "duration": 1.0}
+
+        with mock.patch.object(autologin, "login_account", side_effect=mock_login):
+            import asyncio
+            asyncio.run(autologin.run_batch(accounts))
+
+        assert len(set(saved_profiles)) == len(accounts)
+
+
+class TestBugEmptyProfileName:
+    """Fix: emails like '@gmail.com' now produce 'unknown' instead of empty."""
+
+    def test_empty_local_part_produces_unknown(self, autologin):
+        """An email starting with '@' produces 'unknown' profile name."""
+        email = "@gmail.com"
+        profile = email.split("@")[0].replace(".", "-") or "unknown"
+        assert profile == "unknown"
+
+    def test_generate_unique_profiles_handles_empty_local(self, autologin):
+        """_generate_unique_profiles falls back to 'unknown' for empty local parts."""
+        accounts = [{"email": "@gmail.com", "password": "p"}]
+        profiles = autologin._generate_unique_profiles(accounts)
+        assert profiles == ["unknown"]
+
+
+class TestBugZombieProcess:
+    """Fix: proc.kill() is now always followed by proc.wait()."""
+
+    def test_kill_followed_by_wait(self, autologin, tmp_path):
+        """After proc.kill(), proc.wait() must be called to reap the zombie."""
+        auth_dir = tmp_path / "qoder" / ".auth"
+        auth_dir.mkdir(parents=True)
+        auth_file = auth_dir / "user"
+        auth_file.write_text("")
+
+        mock_proc = mock.MagicMock()
+        mock_proc.stdout = iter([
+            "Starting login...\n",
+            "Some error output\n",
+        ])
+
+        with mock.patch.object(autologin, "QODER_AUTH", auth_file), \
+             mock.patch("subprocess.Popen", return_value=mock_proc):
+            import asyncio
+            result = asyncio.run(autologin.login_account("a@b.com", "pass"))
+
+        assert result["success"] is False
+        mock_proc.kill.assert_called()
+        # Verify wait() was called after kill()
+        method_calls = mock_proc.method_calls
+        kill_idx = None
+        wait_after_kill = False
+        for i, call in enumerate(method_calls):
+            if call == mock.call.kill():
+                kill_idx = i
+            elif kill_idx is not None and i > kill_idx:
+                if call == mock.call.wait() or str(call).startswith("call.wait("):
+                    wait_after_kill = True
+                    break
+        assert wait_after_kill, (
+            "proc.kill() called without subsequent proc.wait()"
+        )
+
+
+class TestBugPrintSummaryEmptyResults:
+    """Fix: print_summary returns False for empty results."""
+
+    def test_empty_results_returns_false(self, autologin, capsys):
+        """Empty results list returns False (not success)."""
+        ok = autologin.print_summary([])
+        assert ok is False
+
+
+class TestBugConcurrentSharedAuthFile:
+    """Fix: concurrent > 1 uses isolated temp auth files per login."""
+
+    def test_concurrent_logins_use_isolated_auth_files(self, autologin):
+        """With concurrent>1, each login gets its own auth file path."""
+        accounts = [
+            {"email": "a@test.com", "password": "pass1"},
+            {"email": "b@test.com", "password": "pass2"},
+        ]
+
+        auth_files_used = []
+
+        async def mock_login(email, password, profile_name=None, save=True,
+                             auth_file_override=None):
+            auth_files_used.append(auth_file_override)
+            return {"email": email, "success": True, "profile": profile_name,
+                    "error": None, "duration": 1.0}
+
+        with mock.patch.object(autologin, "login_account", side_effect=mock_login):
+            import asyncio
+            asyncio.run(autologin.run_batch(accounts, concurrent=2))
+
+        # Each concurrent login should get a different auth file path
+        assert all(f is not None for f in auth_files_used), (
+            "auth_file_override should be set for concurrent logins"
+        )
+        assert len(set(auth_files_used)) == len(accounts), (
+            f"Expected unique auth files, got: {auth_files_used}"
+        )
+
+    def test_sequential_logins_share_auth_file(self, autologin):
+        """With concurrent=1, auth_file_override is None (uses default)."""
+        accounts = [{"email": "a@test.com", "password": "pass1"}]
+
+        auth_files_used = []
+
+        async def mock_login(email, password, profile_name=None, save=True,
+                             auth_file_override=None):
+            auth_files_used.append(auth_file_override)
+            return {"email": email, "success": True, "profile": profile_name,
+                    "error": None, "duration": 1.0}
+
+        with mock.patch.object(autologin, "login_account", side_effect=mock_login):
+            import asyncio
+            asyncio.run(autologin.run_batch(accounts, concurrent=1))
+
+        assert auth_files_used == [None]
+
+
+class TestBugBatchNoSaveFlag:
+    """Fix: batch mode now passes no_save to run_batch."""
+
+    def test_batch_passes_no_save_to_run_batch(self, autologin, tmp_path):
+        """run_batch receives no_save and passes save=False to login_account."""
+        accounts = [{"email": "user@test.com", "password": "pass"}]
+
+        save_values = []
+
+        async def mock_login(email, password, profile_name=None, save=True,
+                             auth_file_override=None):
+            save_values.append(save)
+            return {"email": email, "success": True, "profile": profile_name,
+                    "error": None, "duration": 1.0}
+
+        with mock.patch.object(autologin, "login_account", side_effect=mock_login):
+            import asyncio
+            asyncio.run(autologin.run_batch(accounts, no_save=True))
+
+        assert save_values == [False], (
+            f"Expected save=False when no_save=True, got: {save_values}"
+        )

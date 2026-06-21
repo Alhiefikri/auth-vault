@@ -31,18 +31,6 @@ info()  { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 err()   { echo -e "${RED}[ERR]${NC} $*" >&2; }
 
-_cockpit_email() {
-    local email="unknown"
-    if [[ -f "$HOME/.antigravity_cockpit/provider_current_accounts.json" ]]; then
-        local qid
-        qid=$(jq -r '.current_accounts.qoder // empty' "$HOME/.antigravity_cockpit/provider_current_accounts.json" 2>/dev/null || true)
-        if [[ -n "$qid" && -f "$COCKPIT_QODER_ACCOUNTS/${qid}.json" ]]; then
-            email=$(jq -r '.email // "unknown"' "$COCKPIT_QODER_ACCOUNTS/${qid}.json" 2>/dev/null || echo "unknown")
-        fi
-    fi
-    echo "$email"
-}
-
 cmd_save() {
     local name="${1:-}"
     if [[ -z "$name" ]]; then
@@ -58,7 +46,7 @@ cmd_save() {
         exit 1
     fi
 
-    vault_save "$name" "$(_cockpit_email)"
+    vault_save "$name" "$(_detect_email)"
     info "Profile '$name' berhasil disimpan!"
     echo "  File: $VAULT_DIR/$name"
 }
@@ -271,7 +259,7 @@ cmd_add_account() {
         exit 1
     fi
 
-    vault_save "$profile" "$(_cockpit_email)"
+    vault_save "$profile" "$(_detect_email)"
     info "Profile '$profile' disimpan ke vault!"
     echo "  File: $VAULT_DIR/$profile"
 }

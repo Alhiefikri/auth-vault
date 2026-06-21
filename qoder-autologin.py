@@ -14,7 +14,7 @@ Usage:
   python3 qoder-autologin.py --batch accounts.txt --headless --concurrent 2
 """
 
-import argparse, asyncio, json, re, shutil, subprocess, sys, time
+import argparse, asyncio, json, os, re, shutil, subprocess, sys, tempfile, time
 from datetime import datetime
 from pathlib import Path
 
@@ -470,14 +470,25 @@ async def _handle_select_accounts(page, email):
 
 
 # ── Main login flow ──────────────────────────────────────────────────
-async def login_account(email, password, profile_name=None):
+async def login_account(email, password, profile_name=None, save=True,
+                        auth_file_override=None):
     start_time = time.time()
     log(f"[{email}] Starting login...")
 
     if not profile_name:
-        profile_name = email.split("@")[0].replace(".", "-")
+        profile_name = email.split("@")[0].replace(".", "-") or "unknown"
 
-    pre_mtime = get_auth_file_mtime()
+    auth_path = Path(auth_file_override) if auth_file_override else QODER_AUTH
+    pre_mtime = 0
+    try:
+        pre_mtime = auth_path.stat().st_mtime
+    except OSError:
+        pass
+
+    proc_env = None
+    if auth_file_override:
+        proc_env = os.environ.copy()
+        proc_env["XDG_CONFIG_HOME"] = str(Path(auth_file_override).parent.parent.parent)
 
     proc = subprocess.Popen(
         ["qodercli", "login"],
@@ -485,6 +496,7 @@ async def login_account(email, password, profile_name=None):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=proc_env,
     )
 
     auth_url = None
@@ -504,6 +516,7 @@ async def login_account(email, password, profile_name=None):
     if not auth_url:
         log(f"[{email}] Could not capture auth URL from qodercli", "ERR")
         proc.kill()
+        proc.wait()
         return {"email": email, "success": False, "error": "no_auth_url",
                 "duration": time.time() - start_time}
 
@@ -514,6 +527,7 @@ async def login_account(email, password, profile_name=None):
     if sso_state.get("error") and not sso_state.get("done"):
         log(f"[{email}] SSO failed: {sso_state['error']}", "ERR")
         proc.kill()
+        proc.wait()
         return {"email": email, "success": False, "error": sso_state["error"],
                 "duration": time.time() - start_time}
 
@@ -524,12 +538,32 @@ async def login_account(email, password, profile_name=None):
     except subprocess.TimeoutExpired:
         log(f"[{email}] qodercli timed out (120s)", "ERR")
         proc.kill()
+        proc.wait()
 
-    # Check if auth file was updated
-    post_mtime = get_auth_file_mtime()
+    post_mtime = 0
+    try:
+        post_mtime = auth_path.stat().st_mtime
+    except OSError:
+        pass
     if post_mtime > pre_mtime:
         log(f"[{email}] Auth file updated!", "OK")
-        saved = save_to_vault(profile_name, email)
+        if save:
+            if auth_file_override and auth_path.exists():
+                VAULT_DIR.mkdir(parents=True, exist_ok=True)
+                dest = VAULT_DIR / profile_name
+                shutil.copy2(str(auth_path), str(dest))
+                (VAULT_DIR / ".current").write_text(profile_name)
+                meta = {"name": profile_name, "email": email,
+                        "saved_at": int(time.time())}
+                meta_file = VAULT_DIR / f"{profile_name}.meta.json"
+                meta_file.write_text(json.dumps(meta, indent=2) + "\n")
+                log(f"Profile '{profile_name}' saved to vault ({email})", "OK")
+                saved = True
+            else:
+                saved = save_to_vault(profile_name, email)
+        else:
+            saved = True
+            log(f"[{email}] --no-save: skipping vault save", "INFO")
         duration = time.time() - start_time
         return {"email": email, "success": saved, "profile": profile_name,
                 "error": None if saved else "vault_save_failed",
@@ -563,18 +597,60 @@ def parse_accounts_file(filepath):
     return accounts
 
 
-async def run_batch(accounts, concurrent=1):
+def _generate_unique_profiles(accounts):
+    """Generate unique profile names for a list of accounts.
+
+    Appends a numeric suffix when two accounts share the same local part.
+    """
+    base_names = {}
+    profiles = []
+    for acct in accounts:
+        base = acct["email"].split("@")[0].replace(".", "-") or "unknown"
+        if base in base_names:
+            base_names[base] += 1
+            profiles.append(f"{base}-{base_names[base]}")
+        else:
+            base_names[base] = 1
+            profiles.append(base)
+    return profiles
+
+
+async def run_batch(accounts, concurrent=1, no_save=False):
     semaphore = asyncio.Semaphore(concurrent)
+    profiles = _generate_unique_profiles(accounts)
 
-    async def limited_login(acct):
+    tmp_dirs = []
+
+    async def limited_login(acct, profile):
         async with semaphore:
-            return await login_account(acct["email"], acct["password"])
+            auth_file_override = None
+            if concurrent > 1:
+                tmp_dir = tempfile.mkdtemp(prefix="qoder-auth-")
+                tmp_dirs.append(tmp_dir)
+                auth_dir = Path(tmp_dir) / ".qoder" / ".auth"
+                auth_dir.mkdir(parents=True, exist_ok=True)
+                auth_file_override = str(auth_dir / "user")
+            return await login_account(
+                acct["email"], acct["password"],
+                profile_name=profile,
+                save=not no_save,
+                auth_file_override=auth_file_override,
+            )
 
-    tasks = [limited_login(a) for a in accounts]
-    return list(await asyncio.gather(*tasks))
+    tasks = [limited_login(a, p) for a, p in zip(accounts, profiles)]
+    results = list(await asyncio.gather(*tasks))
+
+    for d in tmp_dirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+    return results
 
 
 def print_summary(results):
+    if not results:
+        log("SUMMARY: no accounts processed", "ERR")
+        return False
+
     success = [r for r in results if r["success"]]
     failed = [r for r in results if not r["success"]]
     total_time = sum(r["duration"] for r in results)
@@ -877,7 +953,7 @@ def main():
             log("No accounts found in batch file", "ERR")
             sys.exit(1)
         log(f"Found {len(accounts)} account(s)", "INFO")
-        results = asyncio.run(run_batch(accounts, CONCURRENT))
+        results = asyncio.run(run_batch(accounts, CONCURRENT, no_save=args.no_save))
         ok = print_summary(results)
         sys.exit(0 if ok else 1)
 
@@ -888,15 +964,14 @@ def main():
             sys.exit(1)
         parts = account.split(":", 1)
         email, password = parts[0].strip(), parts[1].strip()
-        profile = args.profile or email.split("@")[0].replace(".", "-")
+        profile = args.profile or email.split("@")[0].replace(".", "-") or "unknown"
 
         if args.no_save:
             log("Test mode: will not save to vault", "INFO")
 
-        result = asyncio.run(login_account(email, password, profile))
-
-        if args.no_save and result["success"]:
-            log("Test mode: skipping vault save", "INFO")
+        result = asyncio.run(login_account(
+            email, password, profile, save=not args.no_save,
+        ))
 
         if result["success"]:
             log(f"Login successful! Profile: {result.get('profile', '?')}", "OK")

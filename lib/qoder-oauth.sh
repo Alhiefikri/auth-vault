@@ -8,6 +8,9 @@
 #   VAULT_DIR   - canonical vault path (e.g. ~/.auth-vault/qoder)
 #   QODER_AUTH  - active auth file (e.g. ~/.qoder/.auth/user)
 
+_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_lib_dir/detect-email.sh"
+
 QODER_OAUTH_TIMEOUT="${QODER_OAUTH_TIMEOUT:-120}"
 QODER_OAUTH_URL=""
 QODER_OAUTH_RC=1
@@ -112,16 +115,8 @@ qoder_oauth_interactive() {
     read -r name
     [[ -z "$name" ]] && { echo -e "  ${R}Dibatalkan.${N}"; return 1; }
 
-    local email="(unknown)"
-    local cockpit_current="$HOME/.antigravity_cockpit/provider_current_accounts.json"
-    local cockpit_qoder_accounts="$HOME/.antigravity_cockpit/qoder_accounts"
-    if [[ -f "$cockpit_current" ]]; then
-        local qid
-        qid=$(jq -r '.current_accounts.qoder // empty' "$cockpit_current" 2>/dev/null || true)
-        if [[ -n "$qid" && -f "$cockpit_qoder_accounts/${qid}.json" ]]; then
-            email=$(jq -r '.email // "?"' "$cockpit_qoder_accounts/${qid}.json" 2>/dev/null || echo "?")
-        fi
-    fi
+    local email
+    email=$(_detect_email)
 
     vault_save "$name" "$email"
     echo -e "  ${G}✓ Profile '$name' disimpan ke vault!${N}"
