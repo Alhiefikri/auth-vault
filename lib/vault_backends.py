@@ -101,6 +101,35 @@ def cmd_update_cockpit_current(args):
     _write_json(args.path, existing)
 
 
+def cmd_write_openai_vault(args):
+    os.makedirs(args.dir, exist_ok=True)
+    data = {
+        "email": args.email,
+        "account_id": args.account_id,
+        "tokens": {
+            "access_token": args.access,
+            "refresh_token": args.refresh,
+        },
+        "saved_at": int(time.time()),
+    }
+    path = os.path.join(args.dir, f"{args.name}.json")
+    _write_json(path, data)
+
+
+def cmd_delete_openai(args):
+    path = os.path.join(args.dir, f"{args.name}.json")
+    if not os.path.isfile(path):
+        print(f"account not found: {args.name}", file=sys.stderr)
+        sys.exit(1)
+    os.remove(path)
+    current_file = os.path.join(args.dir, ".current")
+    if os.path.isfile(current_file):
+        with open(current_file) as f:
+            current = f.read().strip()
+        if current == args.name:
+            os.remove(current_file)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -150,6 +179,20 @@ def main():
     p_cockpit.add_argument("--provider", required=True)
     p_cockpit.add_argument("--account-id", required=True)
     p_cockpit.set_defaults(func=cmd_update_cockpit_current)
+
+    p_ovault = sub.add_parser("write-openai-vault")
+    p_ovault.add_argument("--dir", required=True)
+    p_ovault.add_argument("--name", required=True)
+    p_ovault.add_argument("--email", required=True)
+    p_ovault.add_argument("--access", required=True)
+    p_ovault.add_argument("--refresh", required=True)
+    p_ovault.add_argument("--account-id", required=True)
+    p_ovault.set_defaults(func=cmd_write_openai_vault)
+
+    p_del = sub.add_parser("delete-openai")
+    p_del.add_argument("--dir", required=True)
+    p_del.add_argument("--name", required=True)
+    p_del.set_defaults(func=cmd_delete_openai)
 
     args = parser.parse_args()
     args.func(args)
