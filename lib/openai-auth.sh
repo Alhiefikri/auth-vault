@@ -106,3 +106,44 @@ openai_vault_get_current() {
         echo ""
     fi
 }
+
+# Requires: COCKPIT_CURRENT, COCKPIT_CODEX_ACCOUNTS, OPENAI_VAULT_DIR set by caller
+# Returns: vault profile name via stdout (empty + return 1 if not found)
+openai_vault_get_cockpit_active() {
+    if [[ ! -f "${COCKPIT_CURRENT:-}" ]]; then
+        echo ""; return 1
+    fi
+
+    local current_codex_id
+    current_codex_id=$(jq -r '.current_accounts.codex // empty' "$COCKPIT_CURRENT" 2>/dev/null)
+    if [[ -z "$current_codex_id" ]]; then
+        echo ""; return 1
+    fi
+
+    local account_file="${COCKPIT_CODEX_ACCOUNTS:-}/${current_codex_id}.json"
+    if [[ ! -f "$account_file" ]]; then
+        echo ""; return 1
+    fi
+
+    local cockpit_email
+    cockpit_email=$(jq -r '.email // empty' "$account_file" 2>/dev/null)
+    if [[ -z "$cockpit_email" ]]; then
+        echo ""; return 1
+    fi
+
+    # Search the OpenAI vault for a matching email
+    openai_vault_ensure_dir
+    for f in "$OPENAI_VAULT_DIR"/*.json; do
+        [[ -f "$f" ]] || continue
+        local vault_email
+        vault_email=$(jq -r '.email // empty' "$f" 2>/dev/null)
+        if [[ "$vault_email" == "$cockpit_email" ]]; then
+            local bn
+            bn=$(basename "$f" .json)
+            echo "$bn"
+            return 0
+        fi
+    done
+
+    echo ""; return 1
+}

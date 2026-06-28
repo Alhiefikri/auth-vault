@@ -23,6 +23,7 @@ OPENAI_OAUTH_CODE_CHALLENGE=""
 OPENAI_OAUTH_STATE=""
 OPENAI_OAUTH_URL=""
 OPENAI_OAUTH_RC=1
+OPENAI_OAUTH_CODE=""
 
 _base64url() {
     openssl base64 -A | tr '+/' '-_' | tr -d '='
@@ -176,6 +177,7 @@ openai_oauth_browser_login() {
 
     if [[ -n "$code" ]]; then
         OPENAI_OAUTH_RC=0
+        OPENAI_OAUTH_CODE="$code"
     fi
     return 0
 }
@@ -212,6 +214,7 @@ openai_oauth_localhost_login() {
 
     if [[ -n "$code" ]]; then
         OPENAI_OAUTH_RC=0
+        OPENAI_OAUTH_CODE="$code"
     fi
     return 0
 }

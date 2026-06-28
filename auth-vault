@@ -283,6 +283,15 @@ dashboard() {
             local email; email=$(jq -r '.email // "?"' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
             local token; token=$(jq -r '.tokens.access_token // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
             local plan="?" exp="?" exp_color="$D"
+            # Determine email color based on vault current status
+            local _dash_email_color="$G"
+            local _dash_vn; _dash_vn=$(openai_vault_get_current) || true
+            if [[ -n "$_dash_vn" ]]; then
+                local _dash_ve; _dash_ve=$(openai_vault_get "$_dash_vn" "email") || true
+                if [[ "$email" == "$_dash_ve" ]]; then
+                    _dash_email_color="$C"
+                fi
+            fi
             [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
             if [[ "$exp" == "expired" ]]; then
                 exp_color="$R"
@@ -320,7 +329,7 @@ dashboard() {
             elif [[ "$reset_cd" =~ ^[0-9]+d ]]; then reset_color="$G"
             fi
             bar="${bar}  ${D}R:${N}${reset_color}${reset_cd}${N}"
-            printf "  ${D}│${N} ${G}%-8s${N} ${D}│${N} %-28s ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
+            printf "  ${D}│${N} ${_dash_email_color}%-8s${N} ${D}│${N} ${_dash_email_color}%-28s${N} ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
         else
             printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun aktif)" "" "" ""
         fi
@@ -351,6 +360,14 @@ dashboard() {
     fi
 
     echo -e "  ${D}└──────────┴─${hl}─┴────────┴─────────┴───────────────────────────┘${N}"
+    # Vault info
+    local _vault_name; _vault_name=$(openai_vault_get_current) || true
+    local _cp_vault; _cp_vault=$(openai_vault_get_cockpit_active) || true
+    if [[ -n "$_vault_name" || -n "$_cp_vault" ]]; then
+        echo ""
+        [[ -n "$_vault_name" ]] && echo -e "  ${C}vault current:${N}  $_vault_name"
+        [[ -n "$_cp_vault" ]] && echo -e "  ${G}cockpit  →  vault:${N}  $_cp_vault"
+    fi
     echo ""
     echo -e "  ${D}github.com/Alhiefikri/auth-vault${N}"
     echo ""
@@ -367,6 +384,9 @@ detail_openai() {
         press_enter || return $?; return
     fi
 
+    local _ss=0
+    [[ "${AUTH_VAULT_SCREENSHOT:-}" == "1" ]] && _ss=1
+
     local current_id; current_id=$(get_current_codex_id)
     local ids=() emails=() plans=() exps=() tokens=() acct_ids=()
     for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
@@ -377,6 +397,8 @@ detail_openai() {
         local acct_id; acct_id=$(jq -r '.account_id // empty' "$f" 2>/dev/null)
         local plan="?" exp="?"
         [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
+        # Screenshot mode: skip expired accounts
+        if (( _ss )) && [[ "$exp" == "expired" ]]; then continue; fi
         ids+=("$fid"); emails+=("$email"); plans+=("$plan"); exps+=("$exp")
         tokens+=("$token"); acct_ids+=("$acct_id")
     done
@@ -387,7 +409,7 @@ detail_openai() {
     fi
 
     # Live-fetch quota + reset from OpenAI in parallel (cached 60s; stale-fallback)
-    echo -e "  ${D}⟳ Refreshing quota & rate limits from OpenAI (parallel)...${N}"
+    (( _ss == 0 )) && echo -e "  ${D}⟳ Refreshing quota & rate limits from OpenAI (parallel)...${N}"
     local parallel_args=()
     for i in "${!ids[@]}"; do
         parallel_args+=("${tokens[$i]}" "${acct_ids[$i]}")
@@ -397,7 +419,7 @@ detail_openai() {
     fetch_codex_quota_parallel "$parallel_outfile" "${parallel_args[@]}"
     local _t1; _t1=$(date +%s%N)
     local _elapsed_ms=$(( (_t1 - _t0) / 1000000 ))
-    echo -e "  ${D}  ⏱ ${#ids[@]} akun: ${_elapsed_ms}ms${N}" >&2
+    (( _ss == 0 )) && echo -e "  ${D}  ⏱ ${#ids[@]} akun: ${_elapsed_ms}ms${N}" >&2
     mapfile -t parallel_lines < "$parallel_outfile"
     rm -f "$parallel_outfile"
 
@@ -434,6 +456,13 @@ detail_openai() {
     local reset_hl; reset_hl=$(hline 14)
     local bars_hl; bars_hl=$(hline 33)
 
+    # Get vault current email for marker display
+    local vault_current_email=""
+    local vault_current_name; vault_current_name=$(openai_vault_get_current)
+    if [[ -n "$vault_current_name" ]]; then
+        vault_current_email=$(openai_vault_get "$vault_current_name" "email")
+    fi
+
     # Table header
     echo ""
     echo -e "  ${D}┌─────┬─${ec_hl}─┬──────────┬─────────┬─${reset_hl}─┬─${bars_hl}${N}"
@@ -443,8 +472,12 @@ detail_openai() {
 
     for i in "${!ids[@]}"; do
         local marker="o" mcolor="$D" ncolor="$D" ecolor="$D"
-        if [[ "${ids[$i]}" == "$current_id" ]]; then
+        if (( _ss )); then
+            marker="o"; mcolor="$G"; ncolor="$G"; ecolor="$G"
+        elif [[ "${ids[$i]}" == "$current_id" ]]; then
             marker="*"; mcolor="$G"; ncolor="$G"; ecolor="$G"
+        elif [[ -n "$vault_current_email" && "${emails[$i]}" == "$vault_current_email" ]]; then
+            marker="✦"; mcolor="$C"; ncolor="$C"; ecolor="$C"
         elif ! is_account_active "${emails[$i]}"; then
             marker="x"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         fi
@@ -456,6 +489,11 @@ detail_openai() {
         if [[ "$wu" =~ ^[0-9]+$ ]]; then w=$(( 100 - wu )); else w="?"; fi
         if [[ "$h" != "?" ]]; then
             bar="h:$(remaining_bar $h 4)  w:$(remaining_bar $w 4)"
+            if (( _ss )); then
+                # Strip per-widget colors, wrap everything in green
+                bar=$(printf '%s' "$bar" | sed 's/\x1b\[[0-9;]*m//g')
+                bar="${G}${bar}${N}"
+            fi
         else
             bar="${D}─────────────────────────────────${N}"
         fi
@@ -465,7 +503,9 @@ detail_openai() {
         local w_countdown; w_countdown=$(reset_countdown "$w_reset")
         local reset_display="${h_countdown} / ${w_countdown}"
         local reset_color="$D"
-        if [[ "$h_countdown" == "reset" ]]; then
+        if (( _ss )); then
+            reset_color="$G"
+        elif [[ "$h_countdown" == "reset" ]]; then
             reset_color="$R"
         elif [[ "$h_countdown" =~ ^([0-9]+)h ]]; then
             local rh="${BASH_REMATCH[1]}"
@@ -484,7 +524,9 @@ detail_openai() {
 
         # Color-coded expiry
         local exp_display="${exps[$i]}" exp_color="$D"
-        if [[ "$exp_display" == "expired" ]]; then
+        if (( _ss )); then
+            exp_color="$G"
+        elif [[ "$exp_display" == "expired" ]]; then
             exp_color="$R"
         elif [[ "$exp_display" =~ ^[0-9]+d$ ]]; then
             local days="${exp_display%d}"
@@ -499,8 +541,10 @@ detail_openai() {
     echo -e "  ${D}└─────┴─${ec_hl}─┴──────────┴─────────┴─${reset_hl}─┴─${bars_hl}${N}"
 
     # Legend
-    echo ""
-    echo -e "  ${G}*${N} aktif (current)   ${D}o${N} cockpit registered   ${Y}x${N} tidak di accounts.json"
+    if (( _ss == 0 )); then
+        echo ""
+        echo -e "  ${G}*${N} cockpit current   ${C}✦${N} vault current   ${D}o${N} registered   ${Y}x${N} not in accounts.json"
+    fi
 
     # Footer
     echo ""
@@ -1125,11 +1169,8 @@ _openai_finish_add() {
     local method="$1"
     echo -e "  ${Y}Menukar code dengan token...${N}"
 
-    local code_file
-    code_file=$(mktemp)
-    local code
-    code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]') || true
-    rm -f "$code_file"
+    local code="${OPENAI_OAUTH_CODE:-}"
+    OPENAI_OAUTH_CODE=""
 
     if [[ -z "$code" ]]; then
         echo -e "  ${Y}Masukkan code dari redirect URL:${N}"
