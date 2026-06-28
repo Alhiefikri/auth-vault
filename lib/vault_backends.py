@@ -75,11 +75,22 @@ def cmd_write_opencode(args):
 
 def cmd_write_codex(args):
     existing = _load_json(args.path)
-    if "tokens" not in existing:
+    existing["auth_mode"] = None
+    existing["openai_api_key"] = None
+    existing["base_url"] = None
+    
+    if "tokens" not in existing or not isinstance(existing["tokens"], dict):
         existing["tokens"] = {}
+        
     existing["tokens"]["access_token"] = args.access
     existing["tokens"]["refresh_token"] = args.refresh
     existing["tokens"]["account_id"] = args.account_id
+    if args.id_token:
+        existing["tokens"]["id_token"] = args.id_token
+        
+    import datetime
+    existing["last_refresh"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    
     _write_json(args.path, existing)
 
 
@@ -112,6 +123,8 @@ def cmd_write_openai_vault(args):
         },
         "saved_at": int(time.time()),
     }
+    if args.id_token:
+        data["tokens"]["id_token"] = args.id_token
     path = os.path.join(args.dir, f"{args.name}.json")
     _write_json(path, data)
 
@@ -166,6 +179,7 @@ def main():
     p_codex.add_argument("--refresh", required=True)
     p_codex.add_argument("--expires", required=True)
     p_codex.add_argument("--account-id", required=True)
+    p_codex.add_argument("--id-token", default="")
     p_codex.set_defaults(func=cmd_write_codex)
 
     p_meta = sub.add_parser("write-meta")
@@ -187,6 +201,7 @@ def main():
     p_ovault.add_argument("--access", required=True)
     p_ovault.add_argument("--refresh", required=True)
     p_ovault.add_argument("--account-id", required=True)
+    p_ovault.add_argument("--id-token", default="")
     p_ovault.set_defaults(func=cmd_write_openai_vault)
 
     p_del = sub.add_parser("delete-openai")

@@ -130,6 +130,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 try:
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(('localhost', ${port}), Handler) as httpd:
         httpd.timeout = ${OPENAI_OAUTH_TIMEOUT}
         httpd.handle_request()

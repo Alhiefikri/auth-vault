@@ -16,6 +16,7 @@ openai_vault_save() {
     local access="$3"
     local refresh="$4"
     local account_id="$5"
+    local id_token="${6:-}"
 
     openai_vault_ensure_dir
 
@@ -27,7 +28,8 @@ openai_vault_save() {
         --email "$email" \
         --access "$access" \
         --refresh "$refresh" \
-        --account-id "$account_id"
+        --account-id "$account_id" \
+        --id-token "$id_token"
 
     echo "$name" > "$OPENAI_VAULT_DIR/.current"
 }

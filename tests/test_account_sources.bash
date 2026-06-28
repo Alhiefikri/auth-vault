@@ -203,4 +203,96 @@ assert_equal "1" "$status"
 COCKPIT_CURRENT="$COCKPIT_CURRENT_BAK"
 test_end
 
+# === read_source_codex_accounts ===
+# Fixture: local codex_accounts directory (repo-style)
+CODEX_ACCOUNTS_DIR="$TEST_HOME/codex_accounts"
+mkdir -p "$CODEX_ACCOUNTS_DIR"
+
+cat > "$CODEX_ACCOUNTS_DIR/codex_abc123.json" <<EOF
+{
+  "id": "codex_abc123",
+  "email": "local-codex@example.com",
+  "plan_type": "plus",
+  "account_id": "local-acct-789",
+  "tokens": {
+    "access_token": "$FIXTURE_TOKEN",
+    "refresh_token": "local-refresh-999"
+  }
+}
+EOF
+
+cat > "$CODEX_ACCOUNTS_DIR/codex_def456.json" <<EOF
+{
+  "id": "codex_def456",
+  "email": "second@example.com",
+  "plan_type": "pro",
+  "account_id": "local-acct-000",
+  "tokens": {
+    "access_token": "$FIXTURE_TOKEN",
+    "refresh_token": "local-refresh-111"
+  }
+}
+EOF
+
+# .bak files should be ignored
+cat > "$CODEX_ACCOUNTS_DIR/codex_abc123.json.bak" <<EOF
+{ "id": "codex_abc123", "email": "old@example.com", "tokens": {} }
+EOF
+
+test_start "read_source_codex_accounts: reads specified account by id"
+read_source_codex_accounts "codex_abc123"
+assert_equal "0" "$?"
+assert_equal "$FIXTURE_TOKEN" "$ACCESS_TOKEN"
+assert_equal "local-refresh-999" "$REFRESH_TOKEN"
+assert_equal "$FIXTURE_EXP_MS" "$EXPIRES"
+assert_equal "local-acct-789" "$ACCOUNT_ID"
+assert_equal "local-codex@example.com" "$EMAIL"
+assert_equal "Repo Codex" "$SOURCE"
+test_end
+
+test_start "read_source_codex_accounts: reads second account"
+read_source_codex_accounts "codex_def456"
+assert_equal "0" "$?"
+assert_equal "second@example.com" "$EMAIL"
+assert_equal "local-refresh-111" "$REFRESH_TOKEN"
+test_end
+
+test_start "read_source_codex_accounts: reads from .current when no id given"
+echo "codex_abc123" > "$CODEX_ACCOUNTS_DIR/.current"
+read_source_codex_accounts
+assert_equal "0" "$?"
+assert_equal "local-codex@example.com" "$EMAIL"
+test_end
+
+test_start "read_source_codex_accounts: reads first account when no .current and no id"
+rm -f "$CODEX_ACCOUNTS_DIR/.current"
+# Clear source globals first
+ACCESS_TOKEN=""; REFRESH_TOKEN=""; EXPIRES=""; ACCOUNT_ID=""; EMAIL=""; SOURCE=""
+read_source_codex_accounts
+assert_equal "0" "$?"
+assert_equal "$FIXTURE_TOKEN" "$ACCESS_TOKEN"
+assert_equal "Repo Codex" "$SOURCE"
+test_end
+
+test_start "read_source_codex_accounts: fails when directory missing"
+CODEX_ACCOUNTS_DIR_BAK="$CODEX_ACCOUNTS_DIR"
+CODEX_ACCOUNTS_DIR="/nonexistent/codex_accounts"
+read_source_codex_accounts && status=0 || status=$?
+assert_equal "1" "$status"
+CODEX_ACCOUNTS_DIR="$CODEX_ACCOUNTS_DIR_BAK"
+test_end
+
+test_start "read_source_codex_accounts: fails when account id not found"
+read_source_codex_accounts "nonexistent_id" && status=0 || status=$?
+assert_equal "1" "$status"
+test_end
+
+test_start "read_source_codex_accounts: ignores .bak files"
+rm -f "$CODEX_ACCOUNTS_DIR/.current"
+# Remove all .json files except .bak
+rm -f "$CODEX_ACCOUNTS_DIR/codex_abc123.json" "$CODEX_ACCOUNTS_DIR/codex_def456.json"
+read_source_codex_accounts && status=0 || status=$?
+assert_equal "1" "$status"
+test_end
+
 test_summary

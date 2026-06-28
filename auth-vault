@@ -48,6 +48,7 @@ while [ -L "$SOURCE" ]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+CODEX_ACCOUNTS_DIR="$SCRIPT_DIR/codex_accounts"
 source "$SCRIPT_DIR/lib/vault-profiles.sh"
 source "$SCRIPT_DIR/lib/jwt-helpers.sh"
 source "$SCRIPT_DIR/lib/find-autologin.sh"
@@ -276,14 +277,14 @@ dashboard() {
         "Tool" "Akun Aktif" "Plan" "Token" "Usage"
     echo -e "  ${D}├──────────┼─${hl}─┼────────┼─────────┼───────────────────────────┤${N}"
 
-    # OpenAI row
+    # OpenAI row - read from Cockpit or fall back to codex_accounts
+    local _dash_openai_ok=false
     if [[ -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
         local cid; cid=$(get_current_codex_id)
         if [[ -n "$cid" && -f "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" ]]; then
             local email; email=$(jq -r '.email // "?"' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
             local token; token=$(jq -r '.tokens.access_token // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
-            local plan="?" exp="?" exp_color="$D"
-            # Determine email color based on vault current status
+            local plan="?" exp="?" exp_color="$D" _dash_source_label="Cockpit"
             local _dash_email_color="$G"
             local _dash_vn; _dash_vn=$(openai_vault_get_current) || true
             if [[ -n "$_dash_vn" ]]; then
@@ -302,7 +303,6 @@ dashboard() {
                 [[ $days -ge 4 ]] && exp_color="$G"
             fi
             local acct_id; acct_id=$(jq -r '.account_id // empty' "$COCKPIT_CODEX_ACCOUNTS/${cid}.json" 2>/dev/null)
-            # Single live fetch: quota used% + reset timestamps from OpenAI (cached 60s)
             local live_q; live_q=$(fetch_codex_quota_cached "$token" "$acct_id")
             local bar="" h_reset_ts=""
             if [[ "$live_q" != "?|?|?|?" && "$live_q" != "?|?" ]]; then
@@ -313,7 +313,6 @@ dashboard() {
                 [[ -n "$h_rem" ]] && bar="h:$(remaining_bar "$h_rem" 4)"
                 h_reset_ts="$hr"
             else
-                # Fallback to Cockpit cache
                 local ud; ud=$(get_codex_usage "$email")
                 local h="${ud%%|*}"
                 [[ "$h" != "?" ]] && bar="h:$(remaining_bar $h 4)"
@@ -330,11 +329,65 @@ dashboard() {
             fi
             bar="${bar}  ${D}R:${N}${reset_color}${reset_cd}${N}"
             printf "  ${D}│${N} ${_dash_email_color}%-8s${N} ${D}│${N} ${_dash_email_color}%-28s${N} ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "$email" "$plan" "$exp" "$bar"
-        else
-            printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun aktif)" "" "" ""
+            _dash_openai_ok=true
         fi
-    else
-        printf "  ${D}│${N} %-8s ${D}│${N} ${R}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "Cockpit tidak terdeteksi" "" "" ""
+    fi
+
+    if [[ "$_dash_openai_ok" != "true" && -d "$CODEX_ACCOUNTS_DIR" ]]; then
+        # Fallback: show first account from codex_accounts (or .current)
+        local _dash_ca_id=""
+        if [[ -f "$CODEX_ACCOUNTS_DIR/.current" ]]; then
+            _dash_ca_id=$(cat "$CODEX_ACCOUNTS_DIR/.current" 2>/dev/null || true)
+        fi
+        local _dash_ca_file=""
+        if [[ -n "$_dash_ca_id" ]]; then
+            _dash_ca_file="$CODEX_ACCOUNTS_DIR/${_dash_ca_id}.json"
+        fi
+        if [[ -z "$_dash_ca_file" || ! -f "$_dash_ca_file" ]]; then
+            for f in "$CODEX_ACCOUNTS_DIR"/codex_*.json; do
+                [[ -f "$f" ]] || continue
+                _dash_ca_file="$f"
+                break
+            done
+        fi
+        if [[ -f "$_dash_ca_file" ]]; then
+            local email; email=$(jq -r '.email // "?"' "$_dash_ca_file" 2>/dev/null)
+            local token; token=$(jq -r '.tokens.access_token // empty' "$_dash_ca_file" 2>/dev/null)
+            local plan="?" exp="?" exp_color="$D"
+            local _dash_email_color="$Y"
+            [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
+            if [[ "$exp" == "expired" ]]; then exp_color="$R"
+            elif [[ "$exp" =~ ^[0-9]+d$ ]]; then
+                local days="${exp%d}"
+                [[ $days -le 1 ]] && exp_color="$R"
+                [[ $days -ge 2 && $days -le 3 ]] && exp_color="$Y"
+                [[ $days -ge 4 ]] && exp_color="$G"
+            fi
+            local bar=""
+            local acct_id; acct_id=$(jq -r '.account_id // empty' "$_dash_ca_file" 2>/dev/null)
+            [[ -n "$token" && -n "$acct_id" ]] && {
+                local live_q; live_q=$(fetch_codex_quota_cached "$token" "$acct_id")
+                if [[ "$live_q" != "?|?|?|?" && "$live_q" != "?|?" ]]; then
+                    IFS='|' read -r hu wu hr wr <<< "$live_q"
+                    local h_rem=""
+                    if [[ "$hu" =~ ^[0-9]+$ ]]; then h_rem=$(( 100 - hu )); fi
+                    [[ -n "$h_rem" ]] && bar="h:$(remaining_bar "$h_rem" 4)"
+                    bar="${bar}  ${D}R:${N}$(reset_countdown "$hr")"
+                fi
+            }
+            printf "  ${D}│${N} ${Y}%-8s${N} ${D}│${N} ${Y}%-28s${N} ${D}│${N} %-6s ${D}│${N} ${exp_color}%-7s${N} ${D}│${N} %b  ${D}│${N}\n" "OpenAI" "📁 $email" "$plan" "$exp" "$bar"
+            _dash_openai_ok=true
+        fi
+    fi
+
+    if [[ "$_dash_openai_ok" != "true" ]]; then
+        if [[ -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
+            printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun aktif)" "" "" ""
+        elif [[ -d "$CODEX_ACCOUNTS_DIR" ]]; then
+            printf "  ${D}│${N} %-8s ${D}│${N} ${D}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "(belum ada akun di codex_accounts)" "" "" ""
+        else
+            printf "  ${D}│${N} %-8s ${D}│${N} ${R}%-28s${N} ${D}│${N} %-6s ${D}│${N} %-7s ${D}│${N} %-25s ${D}│${N}\n" "OpenAI" "Cockpit tidak terdeteksi" "" "" ""
+        fi
     fi
 
     # Qoder row
@@ -376,35 +429,60 @@ dashboard() {
 # === DETAIL OPENAI (list accounts + switch) ===
 detail_openai() {
     header
-    echo -e "  ${B}🔗 OpenAI${N} ${D}(via Cockpit Tools)${N}"
+    echo -e "  ${B}🔗 OpenAI${N}"
     echo ""
-
-    if [[ ! -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
-        echo -e "  ${R}Cockpit Tools tidak ditemukan.${N}"
-        press_enter || return $?; return
-    fi
 
     local _ss=0
     [[ "${AUTH_VAULT_SCREENSHOT:-}" == "1" ]] && _ss=1
 
     local current_id; current_id=$(get_current_codex_id)
-    local ids=() emails=() plans=() exps=() tokens=() acct_ids=()
-    for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
-        [[ -f "$f" ]] || continue
-        local fid; fid=$(basename "$f" .json)
-        local email; email=$(jq -r '.email // "?"' "$f" 2>/dev/null)
-        local token; token=$(jq -r '.tokens.access_token // empty' "$f" 2>/dev/null)
-        local acct_id; acct_id=$(jq -r '.account_id // empty' "$f" 2>/dev/null)
-        local plan="?" exp="?"
-        [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
-        # Screenshot mode: skip expired accounts
-        if (( _ss )) && [[ "$exp" == "expired" ]]; then continue; fi
-        ids+=("$fid"); emails+=("$email"); plans+=("$plan"); exps+=("$exp")
-        tokens+=("$token"); acct_ids+=("$acct_id")
-    done
+    local ids=() emails=() plans=() exps=() tokens=() acct_ids=() source_dirs=()
+
+    # Read from Cockpit (if available)
+    if [[ -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
+        for f in "$COCKPIT_CODEX_ACCOUNTS"/codex_*.json; do
+            [[ -f "$f" ]] || continue
+            local fid; fid=$(basename "$f" .json)
+            local email; email=$(jq -r '.email // "?"' "$f" 2>/dev/null)
+            local token; token=$(jq -r '.tokens.access_token // empty' "$f" 2>/dev/null)
+            local acct_id; acct_id=$(jq -r '.account_id // empty' "$f" 2>/dev/null)
+            local plan="?" exp="?"
+            [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
+            if (( _ss )) && [[ "$exp" == "expired" ]]; then continue; fi
+            ids+=("$fid"); emails+=("$email"); plans+=("$plan"); exps+=("$exp")
+            tokens+=("$token"); acct_ids+=("$acct_id"); source_dirs+=("$COCKPIT_CODEX_ACCOUNTS")
+        done
+    fi
+
+    # Also read from codex_accounts directory (if available)
+    if [[ -d "$CODEX_ACCOUNTS_DIR" ]]; then
+        for f in "$CODEX_ACCOUNTS_DIR"/codex_*.json; do
+            [[ -f "$f" ]] || continue
+            local fid; fid=$(basename "$f" .json)
+            # Extract base id without .bak suffix
+            local base_id="$fid"
+            local email; email=$(jq -r '.email // "?"' "$f" 2>/dev/null)
+            local token; token=$(jq -r '.tokens.access_token // empty' "$f" 2>/dev/null)
+            local acct_id; acct_id=$(jq -r '.account_id // empty' "$f" 2>/dev/null)
+            local plan="?" exp="?"
+            [[ -n "$token" ]] && { plan=$(jwt_plan "$token"); exp=$(jwt_exp_days "$token"); }
+            if (( _ss )) && [[ "$exp" == "expired" ]]; then continue; fi
+            ids+=("$base_id"); emails+=("$email"); plans+=("$plan"); exps+=("$exp")
+            tokens+=("$token"); acct_ids+=("$acct_id"); source_dirs+=("$CODEX_ACCOUNTS_DIR")
+        done
+    fi
 
     if [[ ${#ids[@]} -eq 0 ]]; then
-        echo -e "  ${Y}Belum ada akun Codex di Cockpit.${N}"
+        if [[ -d "$COCKPIT_CODEX_ACCOUNTS" ]]; then
+            echo -e "  ${Y}Belum ada akun Codex di Cockpit.${N}"
+        elif [[ -d "$CODEX_ACCOUNTS_DIR" ]]; then
+            echo -e "  ${Y}Belum ada akun Codex di codex_accounts.${N}"
+        else
+            echo -e "  ${R}Cockpit Tools tidak ditemukan.${N}"
+            if [[ -d "$CODEX_ACCOUNTS_DIR" ]]; then
+                echo -e "  ${D}Gunakan codex_accounts/ di repo sebagai sumber.${N}"
+            fi
+        fi
         press_enter || return $?; return
     fi
 
@@ -427,7 +505,6 @@ detail_openai() {
     for i in "${!ids[@]}"; do
         local rd="${parallel_lines[$i]:-}"
         if [[ -z "$rd" || "$rd" == "?|?|?|?" || "$rd" == "?|?" ]]; then
-            # Full fallback to Cockpit cache for both used% and reset
             local cu; cu=$(get_codex_usage "${emails[$i]}")
             local cr; cr=$(get_codex_reset "${emails[$i]}")
             live_h_used+=("${cu%%|*}")
@@ -435,14 +512,13 @@ detail_openai() {
             live_h_resets+=("${cr%%|*}")
             live_w_resets+=("${cr##*|}")
         else
-            # Parse 4-tuple: h_used|w_used|h_reset|w_reset
             IFS='|' read -r hu wu hr wr <<< "$rd"
             live_h_used+=("$hu"); live_w_used+=("$wu")
             live_h_resets+=("$hr"); live_w_resets+=("$wr")
         fi
     done
 
-    # Dynamic email column width: total = 86 + email_col (added Reset column)
+    # Dynamic email column width
     local term_width=${COLUMNS:-100}
     local max_email=20
     for email in "${emails[@]}"; do
@@ -456,14 +532,12 @@ detail_openai() {
     local reset_hl; reset_hl=$(hline 14)
     local bars_hl; bars_hl=$(hline 33)
 
-    # Get vault current email for marker display
     local vault_current_email=""
     local vault_current_name; vault_current_name=$(openai_vault_get_current)
     if [[ -n "$vault_current_name" ]]; then
         vault_current_email=$(openai_vault_get "$vault_current_name" "email")
     fi
 
-    # Table header
     echo ""
     echo -e "  ${D}┌─────┬─${ec_hl}─┬──────────┬─────────┬─${reset_hl}─┬─${bars_hl}${N}"
     printf "  ${D}│${N} ${C}%2s${N}  ${D}│${N} ${C}%-${email_col}s${N} ${D}│${N} ${C}%-8s${N} ${D}│${N} ${C}%-7s${N} ${D}│${N} ${C}%-14s${N} ${D}│${N} ${C}%s${N}\n" \
@@ -472,8 +546,13 @@ detail_openai() {
 
     for i in "${!ids[@]}"; do
         local marker="o" mcolor="$D" ncolor="$D" ecolor="$D"
+        local is_codex_accounts=false
+        [[ "${source_dirs[$i]}" == "$CODEX_ACCOUNTS_DIR" ]] && is_codex_accounts=true
+
         if (( _ss )); then
             marker="o"; mcolor="$G"; ncolor="$G"; ecolor="$G"
+        elif $is_codex_accounts; then
+            marker="📁"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         elif [[ "${ids[$i]}" == "$current_id" ]]; then
             marker="*"; mcolor="$G"; ncolor="$G"; ecolor="$G"
         elif [[ -n "$vault_current_email" && "${emails[$i]}" == "$vault_current_email" ]]; then
@@ -482,7 +561,6 @@ detail_openai() {
             marker="x"; mcolor="$Y"; ncolor="$Y"; ecolor="$Y"
         fi
 
-        # Compute remaining % from live OpenAI used_percent (100 - used); fallback to "?"
         local hu="${live_h_used[$i]}" wu="${live_w_used[$i]}"
         local h w bar=""
         if [[ "$hu" =~ ^[0-9]+$ ]]; then h=$(( 100 - hu )); else h="?"; fi
@@ -490,7 +568,6 @@ detail_openai() {
         if [[ "$h" != "?" ]]; then
             bar="h:$(remaining_bar $h 4)  w:$(remaining_bar $w 4)"
             if (( _ss )); then
-                # Strip per-widget colors, wrap everything in green
                 bar=$(printf '%s' "$bar" | sed 's/\x1b\[[0-9;]*m//g')
                 bar="${G}${bar}${N}"
             fi
@@ -518,11 +595,9 @@ detail_openai() {
             reset_color="$G"
         fi
 
-        # Truncate email
         local display_email="${emails[$i]}"
         [[ ${#display_email} -gt $email_col ]] && display_email="${display_email:0:$((email_col-3))}..."
 
-        # Color-coded expiry
         local exp_display="${exps[$i]}" exp_color="$D"
         if (( _ss )); then
             exp_color="$G"
@@ -540,13 +615,11 @@ detail_openai() {
     done
     echo -e "  ${D}└─────┴─${ec_hl}─┴──────────┴─────────┴─${reset_hl}─┴─${bars_hl}${N}"
 
-    # Legend
     if (( _ss == 0 )); then
         echo ""
-        echo -e "  ${G}*${N} cockpit current   ${C}✦${N} vault current   ${D}o${N} registered   ${Y}x${N} not in accounts.json"
+        echo -e "  ${G}*${N} cockpit current   ${C}✦${N} vault current   ${D}o${N} registered   ${Y}x${N} not in accounts.json   ${Y}📁${N} codex_accounts"
     fi
 
-    # Footer
     echo ""
     echo -e "  ${B}${#ids[@]} akun terdaftar${N}  ${D}│${N}  ${D}github.com/Alhiefikri/auth-vault${N}"
     echo ""
@@ -564,9 +637,12 @@ detail_openai() {
 
     local idx=$(( pick - 1 ))
     local chosen_id="${ids[$idx]}"
-    local chosen_file="$COCKPIT_CODEX_ACCOUNTS/${chosen_id}.json"
+    local chosen_source="${source_dirs[$idx]}"
+    local chosen_file="$chosen_source/${chosen_id}.json"
     local access; access=$(jq -r '.tokens.access_token' "$chosen_file")
     local refresh; refresh=$(jq -r '.tokens.refresh_token' "$chosen_file")
+    local id_token; id_token=$(jq -r '.tokens.id_token // empty' "$chosen_file")
+    if [[ -z "$id_token" ]]; then id_token="$access"; fi
     local email; email=$(jq -r '.email // "?"' "$chosen_file")
     local account_id; account_id=$(jq -r '.account_id // .tokens.account_id // ""' "$chosen_file")
     local expires; expires=$(jwt_exp_ms "$access")
@@ -576,8 +652,10 @@ detail_openai() {
     echo -e "  ${Y}Apply ke semua app (omp, pi, opencode, codex)...${N}"
 
     local done_targets=()
+    local attempted=0
 
     if [[ -f "$OMP_DB" ]]; then
+        attempted=$(( attempted + 1 ))
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-omp \
             --db "$OMP_DB" \
             --access "$access" \
@@ -590,6 +668,7 @@ detail_openai() {
     fi
 
     if [[ -d "$(dirname "$PI_AUTH")" ]]; then
+        attempted=$(( attempted + 1 ))
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-pi \
             --path "$PI_AUTH" \
             --access "$access" \
@@ -599,7 +678,8 @@ detail_openai() {
             2>/dev/null && done_targets+=("pi")
     fi
 
-    if [[ -f "$OPENCODE_AUTH" ]]; then
+    if [[ -d "$(dirname "$OPENCODE_AUTH")" ]]; then
+        attempted=$(( attempted + 1 ))
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-opencode \
             --path "$OPENCODE_AUTH" \
             --access "$access" \
@@ -609,17 +689,20 @@ detail_openai() {
             2>/dev/null && done_targets+=("opencode")
     fi
 
-    if [[ -f "$CODEX_AUTH" ]]; then
+    if [[ -d "$(dirname "$CODEX_AUTH")" ]]; then
+        attempted=$(( attempted + 1 ))
         python3 "$SCRIPT_DIR/lib/vault_backends.py" write-codex \
             --path "$CODEX_AUTH" \
             --access "$access" \
             --refresh "$refresh" \
             --expires "$expires" \
             --account-id "$account_id" \
+            --id-token "$id_token" \
             2>/dev/null && done_targets+=("codex")
     fi
 
-    if [[ -f "$COCKPIT_CURRENT" ]]; then
+    # Update Cockpit current if switching a Cockpit account
+    if [[ "$chosen_source" == "$COCKPIT_CODEX_ACCOUNTS" && -f "$COCKPIT_CURRENT" ]]; then
         python3 "$SCRIPT_DIR/lib/vault_backends.py" update-cockpit-current \
             --path "$COCKPIT_CURRENT" \
             --provider "codex" \
@@ -627,14 +710,24 @@ detail_openai() {
             2>/dev/null
     fi
 
+    # Write .current pointer for codex_accounts
+    if [[ "$chosen_source" == "$CODEX_ACCOUNTS_DIR" ]]; then
+        echo "$chosen_id" > "$CODEX_ACCOUNTS_DIR/.current" 2>/dev/null || true
+    fi
+
     echo ""
     if [[ ${#done_targets[@]} -gt 0 ]]; then
         local joined; joined=$(IFS=' + '; echo "${done_targets[*]}")
         echo -e "  ${G}✓ Applied ke: $joined${N}"
-        echo -e "  ${G}✓ Cockpit current updated${N}"
+        local src_label="codex_accounts"
+        [[ "$chosen_source" == "$COCKPIT_CODEX_ACCOUNTS" ]] && src_label="Cockpit"
+        echo -e "  ${G}✓ $src_label current updated${N}"
         echo -e "  ${D}Restart app untuk pakai akun baru.${N}"
+    elif [[ $attempted -eq 0 ]]; then
+        echo -e "  ${Y}Tidak ada app yang terdeteksi (omp, pi, opencode, codex).${N}"
+        echo -e "  ${Y}Akun tersimpan. Install app target untuk menggunakannya.${N}"
     else
-        echo -e "  ${R}Gagal apply.${N}"
+        echo -e "  ${R}Gagal apply ke ${attempted} app.${N}"
     fi
     press_enter || return $?
 }
@@ -1132,9 +1225,10 @@ _openai_exchange_and_save() {
         press_enter || return $?; return
     }
 
-    local access_token refresh_token
+    local access_token refresh_token id_token
     access_token=$(echo "$token_response" | jq -r '.access_token // empty' 2>/dev/null)
     refresh_token=$(echo "$token_response" | jq -r '.refresh_token // empty' 2>/dev/null)
+    id_token=$(echo "$token_response" | jq -r '.id_token // empty' 2>/dev/null)
 
     if [[ -z "$access_token" ]]; then
         echo -e "  ${R}Token tidak ditemukan di response.${N}"
@@ -1160,7 +1254,7 @@ _openai_exchange_and_save() {
     if (( name_rc == 2 )); then return 0; fi
     name="${name:-$default_name}"
 
-    openai_vault_save "$name" "$email" "$access_token" "$refresh_token" "$account_id"
+    openai_vault_save "$name" "$email" "$access_token" "$refresh_token" "$account_id" "$id_token"
     echo -e "  ${G}✓ Akun '$name' disimpan ke vault!${N}"
     press_enter || return $?
 }

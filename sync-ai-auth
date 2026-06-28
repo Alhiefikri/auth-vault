@@ -14,6 +14,7 @@ OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
 CODEX_AUTH="$HOME/.codex/auth.json"
 COCKPIT_CURRENT="$HOME/.antigravity_cockpit/provider_current_accounts.json"
 COCKPIT_CODEX_ACCOUNTS="$HOME/.antigravity_cockpit/codex_accounts"
+CODEX_ACCOUNTS_DIR="$SCRIPT_DIR/codex_accounts"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,8 +69,9 @@ write_to_pi() {
 }
 
 write_to_opencode() {
-    if [[ ! -f "$OPENCODE_AUTH" ]]; then
-        warn "OpenCode auth file tidak ditemukan, skip."
+    local oc_dir; oc_dir=$(dirname "$OPENCODE_AUTH")
+    if [[ ! -d "$oc_dir" ]]; then
+        warn "OpenCode directory tidak ditemukan, skip."
         return 1
     fi
 
@@ -82,8 +84,9 @@ write_to_opencode() {
 }
 
 write_to_codex() {
-    if [[ ! -f "$CODEX_AUTH" ]]; then
-        warn "Codex CLI auth file tidak ditemukan, skip."
+    local cx_dir; cx_dir=$(dirname "$CODEX_AUTH")
+    if [[ ! -d "$cx_dir" ]]; then
+        warn "Codex CLI directory tidak ditemukan, skip."
         return 1
     fi
 
@@ -92,7 +95,8 @@ write_to_codex() {
         --access "$ACCESS_TOKEN" \
         --refresh "$REFRESH_TOKEN" \
         --expires "$EXPIRES" \
-        --account-id "$ACCOUNT_ID"
+        --account-id "$ACCOUNT_ID" \
+        --id-token "${ID_TOKEN:-}" >/dev/null 2>&1
 }
 
 show_status() {
@@ -209,23 +213,27 @@ main() {
             -s|--status) status_only=true ;;
             --only) ;;
             omp|pi|opencode|codex)
-                if [[ "${args[-1]:-}" == "--only" ]]; then
+                local last_arg=""
+                if (( ${#args[@]} > 0 )); then last_arg="${args[-1]}"; fi
+                if [[ "$last_arg" == "--only" ]]; then
                     only_target="$arg"
                 else
                     args+=("$arg")
                 fi
                 ;;
             cockpit) mode="$arg" ;;
+            codex_accounts) mode="$arg" ;;
             -h|--help)
-                echo "Usage: sync-ai-auth [opencode|codex|cockpit] [--yes] [--status] [--only omp|pi|opencode|codex]"
+                echo "Usage: sync-ai-auth [opencode|codex|cockpit|codex_accounts] [--yes] [--status] [--only omp|pi|opencode|codex]"
                 echo ""
                 echo "Sync OpenAI OAuth ke OMP, Pi, OpenCode, dan Codex CLI sekaligus."
                 echo ""
                 echo "Sources:"
-                echo "  opencode  Ambil auth dari OpenCode"
-                echo "  codex     Ambil auth dari Codex CLI"
-                echo "  cockpit   Ambil auth dari Cockpit Tools (akun Codex aktif)"
-                echo "  auto      Coba opencode > codex > cockpit (default)"
+                echo "  opencode       Ambil auth dari OpenCode"
+                echo "  codex          Ambil auth dari Codex CLI"
+                echo "  cockpit        Ambil auth dari Cockpit Tools (akun Codex aktif)"
+                echo "  codex_accounts Ambil auth dari folder codex_accounts/ repo"
+                echo "  auto           Coba opencode > codex > cockpit > codex_accounts (default)"
                 echo ""
                 echo "Flags:"
                 echo "  -y, --yes                Skip konfirmasi"
@@ -247,10 +255,12 @@ main() {
         opencode) read_source_opencode && loaded=true ;;
         codex)    read_source_codex && loaded=true ;;
         cockpit)  read_source_cockpit && loaded=true ;;
+        codex_accounts)  read_source_codex_accounts && loaded=true ;;
         auto)
             read_source_opencode && loaded=true \
             || { read_source_codex && loaded=true; } \
-            || { read_source_cockpit && loaded=true; }
+            || { read_source_cockpit && loaded=true; } \
+            || { read_source_codex_accounts && loaded=true; }
             ;;
     esac
 

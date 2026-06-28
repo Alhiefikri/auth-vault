@@ -42,11 +42,21 @@ qoder_oauth_login() {
     local pid=$!
 
     local url="" elapsed=0
+    local opened_browser=false
     while (( elapsed < 10 )) && kill -0 "$pid" 2>/dev/null; do
         sleep 1
         elapsed=$((elapsed + 1))
         if [[ -z "$url" ]]; then
             url=$(qoder_oauth_extract_url "$(cat "$tmpfile" 2>/dev/null)")
+            if [[ -n "$url" && "$opened_browser" == false ]]; then
+                echo -e "  [i] Silakan klik link berikut jika browser tidak terbuka otomatis:\n  \033[0;36m$url\033[0m" >&2
+                if command -v xdg-open &>/dev/null; then
+                    xdg-open "$url" &>/dev/null &
+                elif command -v open &>/dev/null; then
+                    open "$url" &>/dev/null &
+                fi
+                opened_browser=true
+            fi
         fi
     done
 
