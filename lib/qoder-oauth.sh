@@ -50,6 +50,9 @@ qoder_oauth_login() {
             url=$(qoder_oauth_extract_url "$(cat "$tmpfile" 2>/dev/null)")
             if [[ -n "$url" && "$opened_browser" == false ]]; then
                 echo -e "  [i] Silakan klik link berikut jika browser tidak terbuka otomatis:\n  \033[0;36m$url\033[0m" >&2
+                if command -v copy_to_clipboard &>/dev/null && copy_to_clipboard "$url"; then
+                    echo -e "  \033[0;32m(URL telah otomatis disalin ke clipboard!)\033[0m" >&2
+                fi
                 if command -v xdg-open &>/dev/null; then
                     xdg-open "$url" &>/dev/null &
                 elif command -v open &>/dev/null; then

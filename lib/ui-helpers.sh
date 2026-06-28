@@ -81,3 +81,21 @@ reset_countdown() {
         echo "${mins}m"
     fi
 }
+
+copy_to_clipboard() {
+    local text="$1"
+    if command -v pbcopy &>/dev/null; then
+        echo -n "$text" | pbcopy
+        return 0
+    elif command -v xclip &>/dev/null; then
+        echo -n "$text" | xclip -selection clipboard
+        return 0
+    elif command -v wl-copy &>/dev/null; then
+        echo -n "$text" | wl-copy
+        return 0
+    elif command -v xsel &>/dev/null; then
+        echo -n "$text" | xsel --clipboard --input
+        return 0
+    fi
+    return 1
+}

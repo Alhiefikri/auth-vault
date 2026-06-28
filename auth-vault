@@ -1160,6 +1160,9 @@ add_account_openai_link() {
     echo -e "  ${Y}Copy link berikut ke browser:${N}"
     echo ""
     echo -e "  ${C}${OPENAI_OAUTH_URL}${N}"
+    if copy_to_clipboard "$OPENAI_OAUTH_URL"; then
+        echo -e "  ${G}(URL telah otomatis disalin ke clipboard!)${N}"
+    fi
     echo ""
     echo -e "  ${Y}Setelah login, copy URL redirect (localhost) dan paste di sini:${N}"
     echo -n "  > "
@@ -1197,6 +1200,9 @@ add_account_openai_localhost() {
     echo -e "  ${Y}Copy link berikut ke browser:${N}"
     echo ""
     echo -e "  ${C}${OPENAI_OAUTH_URL}${N}"
+    if copy_to_clipboard "$OPENAI_OAUTH_URL"; then
+        echo -e "  ${G}(URL telah otomatis disalin ke clipboard!)${N}"
+    fi
     echo ""
     echo -e "  ${D}Menunggu callback di localhost:${port}...${N}"
     echo -e "  ${D}(Selesaikan login di browser, redirect akan ditangkap otomatis)${N}"
