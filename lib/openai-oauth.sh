@@ -58,7 +58,7 @@ openai_oauth_build_auth_url() {
 openai_oauth_extract_code() {
     local url="$1"
     local code
-    code=$(echo "$url" | grep -oP '(?<=[?&])code=\K[^&]+' | head -1) || true
+    code=$(echo "$url" | grep -oP '(?:^|[?&])code=\K[^&]+' | head -1) || true
     echo "${code:-}"
 }
 

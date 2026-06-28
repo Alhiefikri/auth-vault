@@ -1267,13 +1267,14 @@ _openai_finish_add() {
     OPENAI_OAUTH_CODE=""
 
     if [[ -z "$code" ]]; then
-        echo -e "  ${Y}Masukkan code dari redirect URL:${N}"
+        echo -e "  ${Y}Masukkan code atau paste URL dari redirect:${N}"
         echo -n "  > "
         read_input code || return 0
+        code=$(openai_oauth_extract_code "$code")
     fi
 
     if [[ -z "$code" ]]; then
-        echo -e "  ${R}Code kosong.${N}"
+        echo -e "  ${R}Code kosong atau tidak ditemukan dalam URL.${N}"
         press_enter || return $?; return
     fi
 
